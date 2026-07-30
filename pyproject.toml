@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autonomy-engine"
+version = "0.1.0"
+description = "PS-9.1 Graduated Autonomy Engine — risk-scores agent actions and routes them to the right autonomy level"
+requires-python = ">=3.12"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# Tests import `autonomy_engine.*` directly; src/ on the path makes that work
+# without needing an editable install.
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "integration: hits the real Anthropic API; skipped unless ANTHROPIC_API_KEY is set",
+]

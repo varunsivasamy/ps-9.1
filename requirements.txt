@@ -1,0 +1,12 @@
+fastapi
+mangum
+boto3
+anthropic
+pydantic
+pytest
+python-dotenv
+uvicorn
+
+# Test-only dependencies
+httpx        # required by fastapi.testclient
+moto[dynamodb]  # mock AWS for audit store tests
