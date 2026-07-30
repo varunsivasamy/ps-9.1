@@ -99,6 +99,16 @@ export interface HealthResponse {
   dynamodb: "reachable" | "unreachable";
 }
 
+export interface CalibrationEntry {
+  confirms_without_modification: number;
+  rejects_or_modifications: number;
+  band_offset: number;
+}
+
+export interface CalibrationSnapshotResponse {
+  calibration: Record<string, CalibrationEntry>;
+}
+
 export interface ApiErrorPayload {
   error: { message: string };
 }

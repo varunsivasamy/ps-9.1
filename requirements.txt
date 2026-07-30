@@ -10,7 +10,7 @@ httpx==0.28.1
 starlette==0.41.3
 
 # Dev/test only — not installed on Lambda
-# moto[dynamodb]
-# moto[server]
-# pytest
+moto[dynamodb]
+moto[server]
+pytest
 # httpx  (above covers this)

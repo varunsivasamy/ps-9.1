@@ -2,6 +2,7 @@ import {
   ApiError,
   type ApiErrorPayload,
   type AuditTrailResponse,
+  type CalibrationSnapshotResponse,
   type ConfirmationDecision,
   type HealthResponse,
   type ProposeResponse,
@@ -77,6 +78,10 @@ export function getAuditTrail(sessionId: string): Promise<AuditTrailResponse> {
 
 export function getHealth(): Promise<HealthResponse> {
   return request<HealthResponse>("/health");
+}
+
+export function getCalibration(): Promise<CalibrationSnapshotResponse> {
+  return request<CalibrationSnapshotResponse>("/calibration");
 }
 
 export { BASE_URL as apiBaseUrl };

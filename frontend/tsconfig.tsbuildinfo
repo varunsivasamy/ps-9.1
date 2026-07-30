@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/actionresult.tsx","./src/components/audittrail.tsx","./src/components/requestform.tsx","./src/components/riskbreakdown.tsx","./src/components/sessionbar.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/calibrationpanel.tsx"],"version":"5.9.3"}
