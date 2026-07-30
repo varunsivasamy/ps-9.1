@@ -132,6 +132,14 @@ export default function App() {
             <ActionResult
               result={latestResult}
               onResolved={() => refreshAudit(sessionId)}
+              onClarify={(answer) => {
+                // Re-submit with the clarification answer attached
+                const original =
+                  latestResult.routing_decision === "needs_clarification"
+                    ? (latestResult as { question: string }).question
+                    : "";
+                handleSubmit(`${original} — clarification: ${answer}`);
+              }}
             />
           )}
         </section>

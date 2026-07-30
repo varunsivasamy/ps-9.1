@@ -159,43 +159,79 @@ Schema columns: {', '.join(data_store.FIELDS)}
 Known categorical values:
 {_CATEGORY_HINT}
 
-=== YOUR JOB (two phases, in order) ===
+=== MANDATORY TWO-PHASE PROCESS ===
 
-PHASE 1 — MEASURE
-Call count_matching_rows with the filter that matches the rows your intended
-action will touch.  Do this FIRST so your data_scope reflects the real row
-count, not a guess.  For single-record actions (update/delete one invoice)
-you may skip this and use data_scope = 1.
+PHASE 1 — MEASURE (REQUIRED for bulk_delete_transactions)
+You MUST call count_matching_rows before propose_action_tool whenever the
+action is bulk_delete_transactions. Use your intended filter to get the real
+row count. This is not optional.
 
-If you cannot safely interpret the request, call ask_for_clarification instead
-of guessing.
+For update_transaction and delete_transaction (single record): skip phase 1,
+use data_scope = 1.
+For query_transactions and summarize_transactions (reads): skip phase 1,
+use data_scope = 0.
+
+If the request is ambiguous and you cannot build a safe filter, call
+ask_for_clarification instead.
 
 PHASE 2 — PROPOSE
-After measuring, call propose_action_tool with:
+Call propose_action_tool with ALL of the following fields (every field is
+required, every string field must be non-empty):
 
-  tool_name     one of: query_transactions | summarize_transactions |
-                        update_transaction | delete_transaction |
-                        bulk_delete_transactions
-  parameters    the arguments for that tool (use the filter/invoice_no/field/
-                new_value/group_by keys as described per tool)
-  reversibility
-    "reversible"           reads (nothing changes)
-    "partially_reversible" updates (old value kept in snapshot)
-    "irreversible"         any delete (rows cannot be restored)
-  data_scope    exact integer from count_matching_rows, or 1 for single-record
-  regulatory_category
-    "none"               non-sensitive retail data (quantity, mall, payment)
-    "internal_sensitive" personal identifiers (customer_id, age, gender)
-    "regulated"          financial amounts combined with personal data, or data
-                         the request labels as sensitive / subject to compliance
-  confidence    0.0-1.0  how sure you are your filter/parameters match the intent
-  risk_band     "low" | "medium" | "high"  your overall judgement
-  rationale     one sentence tying the four dimensions to your band choice
+  tool_name       (string, required) one of:
+                    query_transactions
+                    summarize_transactions
+                    update_transaction
+                    delete_transaction
+                    bulk_delete_transactions
 
-Reasoning fields (*_reasoning) are required — they appear verbatim in the
-audit trail a human reviewer reads.
+  filter          (array) criteria for query/summarize/bulk_delete tools
+  invoice_no      (string) for update_transaction and delete_transaction
+  field           (string) for update_transaction
+  new_value       (string) for update_transaction
+  group_by        (string) for summarize_transactions; use "" for no grouping
 
-Do NOT inflate or deflate these to influence the routing outcome.
+  reversibility   (string, required) EXACTLY one of:
+                    "reversible"           — reads only
+                    "partially_reversible" — updates (snapshot kept)
+                    "irreversible"         — ANY delete, single or bulk
+
+  reversibility_reasoning   (string, required, non-empty)
+
+  data_scope      (integer, required) — write as a bare integer, NOT a string:
+                    0  for reads (query_transactions, summarize_transactions)
+                    1  for single-record mutations (update_transaction, delete_transaction)
+                    use the count returned by count_matching_rows for bulk_delete_transactions
+
+  data_scope_reasoning      (string, required, non-empty)
+
+  regulatory_category (string, required) EXACTLY one of:
+                    "none"               — retail metrics only (category, mall,
+                                           payment_method, quantity, price)
+                    "internal_sensitive" — personal fields (customer_id, age, gender)
+                    "regulated"          — financial + personal combined, or
+                                           request labels data as sensitive
+
+  regulatory_reasoning      (string, required, non-empty)
+
+  confidence      (number, required) — write as a bare decimal, NOT a string:
+                    0.0 to 1.0 — how sure you are filter/params match intent
+
+  confidence_reasoning      (string, required, non-empty)
+
+  risk_band       (string, required) EXACTLY one of — follow these rules strictly:
+                    "low"    — reads only (query_transactions, summarize_transactions)
+                    "medium" — single-record update (update_transaction)
+                    "high"   — ANY delete (delete_transaction or bulk_delete_transactions)
+                               regardless of row count
+
+  rationale       (string, required, non-empty) — one sentence tying all four
+                  dimensions to your band choice
+
+IMPORTANT — TYPE RULES (Groq enforces strict JSON types):
+  data_scope MUST be a JSON integer:  1   not "1"
+  confidence MUST be a JSON number:   0.9 not "0.9"
+  All other fields must be strings.
 """
 
 # --------------------------------------------------------------------------
@@ -232,7 +268,7 @@ PHASE1_TOOLS: Final[list[dict[str, Any]]] = [
             "name": "count_matching_rows",
             "description": (
                 "Count rows matching a filter in the transaction CSV. "
-                "Call this FIRST to get the real data_scope."
+                "Call this FIRST to get the real data_scope before bulk_delete_transactions."
             ),
             "parameters": {
                 "type": "object",
@@ -244,27 +280,6 @@ PHASE1_TOOLS: Final[list[dict[str, Any]]] = [
                     },
                 },
                 "required": ["filter", "intent"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ask_for_clarification",
-            "description": "Ask the user a question when the request is too ambiguous to act on safely.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "question": {"type": "string"},
-                    "why":      {"type": "string", "description": "Why you need this to proceed."},
-                    "options":  {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Suggested answers to speed up the user.",
-                    },
-                },
-                "required": ["question", "why"],
                 "additionalProperties": False,
             },
         },
@@ -298,41 +313,74 @@ PHASE1_TOOLS: Final[list[dict[str, Any]]] = [
                     "reversibility": {
                         "type": "string",
                         "enum": ["reversible", "partially_reversible", "irreversible"],
+                        "description": (
+                            "reversible=reads only; "
+                            "partially_reversible=updates (snapshot kept); "
+                            "irreversible=any delete (cannot be undone)"
+                        ),
                     },
-                    "reversibility_reasoning": {"type": "string"},
+                    "reversibility_reasoning": {
+                        "type": "string",
+                        "description": "Why you chose this reversibility level.",
+                    },
                     "data_scope": {
                         "type": "integer",
-                        "description": "Exact count from count_matching_rows, or 1 for single-record.",
+                        "description": (
+                            "Row count from count_matching_rows. "
+                            "Use 0 for reads (they change nothing). "
+                            "Use 1 for single-record mutations. "
+                            "Never guess for bulk operations — call count_matching_rows first."
+                        ),
                     },
-                    "data_scope_reasoning": {"type": "string"},
+                    "data_scope_reasoning": {
+                        "type": "string",
+                        "description": "How you determined this count (measured vs estimated).",
+                    },
                     "regulatory_category": {
                         "type": "string",
                         "enum": ["none", "internal_sensitive", "regulated"],
+                        "description": (
+                            "none=retail metrics (quantity, mall, payment_method, category); "
+                            "internal_sensitive=personal identifiers (customer_id, age, gender); "
+                            "regulated=financial+personal combined, or request labels data as sensitive"
+                        ),
                     },
-                    "regulatory_reasoning": {"type": "string"},
+                    "regulatory_reasoning": {
+                        "type": "string",
+                        "description": "Why this data falls in that sensitivity class.",
+                    },
                     "confidence": {
                         "type": "number",
-                        "description": "0.0-1.0 confidence your parameters match the user's intent.",
+                        "description": (
+                            "0.0-1.0. How sure you are your filter/parameters match the user's intent. "
+                            "Use < 0.7 if the request is ambiguous."
+                        ),
                     },
-                    "confidence_reasoning": {"type": "string"},
+                    "confidence_reasoning": {
+                        "type": "string",
+                        "description": "What you are or are not sure about.",
+                    },
                     "risk_band": {
                         "type": "string",
                         "enum": ["low", "medium", "high"],
+                        "description": (
+                            "low=reads; medium=single-record mutations; "
+                            "high=any delete OR bulk mutations affecting many rows"
+                        ),
                     },
                     "rationale": {
                         "type": "string",
-                        "description": "One sentence tying the four dimensions to your band choice.",
+                        "description": "One sentence tying all four dimensions to your band choice.",
                     },
                 },
                 "required": [
                     "tool_name",
-                    "reversibility", "reversibility_reasoning",
-                    "data_scope",    "data_scope_reasoning",
+                    "reversibility",       "reversibility_reasoning",
+                    "data_scope",          "data_scope_reasoning",
                     "regulatory_category", "regulatory_reasoning",
-                    "confidence",    "confidence_reasoning",
-                    "risk_band",     "rationale",
+                    "confidence",          "confidence_reasoning",
+                    "risk_band",           "rationale",
                 ],
-                "additionalProperties": False,
             },
         },
     },
@@ -403,12 +451,88 @@ def _groq_call(
                 )
                 time.sleep(RETRY_DELAY)
         except groq_module.APIStatusError as exc:
+            # 400 "tool call validation failed" means the model sent wrong types
+            # (e.g. "0" instead of 0). Extract the failed_generation JSON and
+            # return it as a synthetic response so _build_action can coerce it.
+            if exc.status_code == 400:
+                # Build a search string from all available error info
+                raw = str(exc)
+                try:
+                    body = exc.body if isinstance(exc.body, dict) else {}
+                    fg = body.get("error", {}).get("failed_generation", "")
+                    if fg:
+                        raw = fg
+                except Exception:
+                    pass
+                synthetic = _parse_failed_generation(raw)
+                if synthetic:
+                    logger.warning(
+                        "Groq schema validation rejected tool call; "
+                        "recovered via failed_generation parsing"
+                    )
+                    return synthetic
             raise AgentActionError(
                 f"Groq API rejected the request ({exc.status_code}): {exc.message}"
             ) from exc
     raise AgentActionError(
         f"Groq API unreachable after {MAX_ATTEMPTS} attempts: {last_err}"
     ) from last_err
+
+
+def _parse_failed_generation(error_text: str) -> Any | None:
+    """Extract and parse a tool call from Groq's failed_generation error field.
+
+    When Groq's strict validator rejects a tool call (e.g. integer sent as
+    string), it includes the raw model output in the error message. We can
+    parse it ourselves and coerce the types, bypassing the validator.
+    """
+    import re
+
+    # Extract the <function=name>{...}</function> or <function=name>{...}> block
+    match = re.search(
+        r"<function=(\w+)>(\{.*?\})(?:</function>|>)",
+        error_text,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+
+    tool_name = match.group(1)
+    raw_json  = match.group(2)
+
+    try:
+        args = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return None
+
+    # Wrap in a fake response object that looks like a Groq response
+    class _FakeFunction:
+        def __init__(self, name: str, arguments: str):
+            self.name = name
+            self.arguments = arguments
+
+    class _FakeToolCall:
+        def __init__(self, name: str, args_str: str):
+            self.id = "recovered-0"
+            self.function = _FakeFunction(name, args_str)
+
+    class _FakeMessage:
+        def __init__(self, tc: _FakeToolCall):
+            self.content = ""
+            self.tool_calls = [tc]
+
+    class _FakeChoice:
+        def __init__(self, msg: _FakeMessage):
+            self.message = msg
+            self.finish_reason = "tool_calls"
+
+    class _FakeResponse:
+        def __init__(self, choice: _FakeChoice):
+            self.choices = [choice]
+
+    tc  = _FakeToolCall(tool_name, json.dumps(args))
+    msg = _FakeMessage(tc)
+    return _FakeResponse(_FakeChoice(msg))
 
 
 # --------------------------------------------------------------------------
@@ -419,19 +543,11 @@ def _groq_call(
 def propose_action(
     user_request: str,
     tool_context: dict[str, Any],
-) -> AgentAction | ClarificationRequest:
-    """Run the two-phase agentic loop and return a proposal or a clarification.
+) -> AgentAction:
+    """Run the two-phase agentic loop and return an action proposal.
 
-    Args:
-        user_request: What the user asked for.
-        tool_context: Optional extra context (e.g. ``clarification from the user``).
-
-    Returns:
-        An :class:`AgentAction` ready for ``build_assessment`` / ``route_action``,
-        or a :class:`ClarificationRequest` if the agent needs more information.
-
-    Raises:
-        AgentActionError: If the agent loop fails to produce either.
+    Never asks for clarification — the LLM reasons and picks the best
+    interpretation of any ambiguous request.
     """
     client  = _groq_client()
     prompt  = user_request
@@ -473,20 +589,41 @@ def propose_action(
             if name == "count_matching_rows":
                 result_str = _run_count(args)
                 messages.append(_tool_msg(tc.id, result_str))
-                # Continue loop — agent will now call propose_action_tool
                 continue
 
-            # ── Clarification ─────────────────────────────────────────────
+            # ── Clarification — disabled: LLM must reason and proceed ─────
             if name == "ask_for_clarification":
-                messages.append(_tool_msg(tc.id, json.dumps({"acknowledged": True})))
-                return ClarificationRequest(
-                    question=args.get("question", ""),
-                    why=args.get("why", ""),
-                    options=args.get("options", []),
-                )
+                # Ignore clarification request, instruct agent to make its
+                # best interpretation and propose an action instead.
+                messages.append(_tool_msg(tc.id, json.dumps({
+                    "instruction": (
+                        "Do not ask for clarification. Make your best reasonable "
+                        "interpretation of the request, pick the safest matching "
+                        "tool, and call propose_action_tool immediately."
+                    )
+                })))
+                continue
 
             # ── Phase 2: propose ──────────────────────────────────────────
             if name == "propose_action_tool":
+                # Safety net: if the agent proposes bulk_delete but skipped
+                # count_matching_rows, measure now before accepting the proposal.
+                if (
+                    args.get("tool_name") == "bulk_delete_transactions"
+                    and int(float(str(args.get("data_scope", 0)))) == 0
+                    and args.get("filter")
+                ):
+                    real_count_str = _run_count({"filter": args["filter"], "intent": "auto-measure"})
+                    real_count = json.loads(real_count_str).get("count", 0)
+                    logger.info(
+                        "auto-measured bulk_delete scope: %d rows (agent skipped phase 1)",
+                        real_count,
+                    )
+                    args["data_scope"] = real_count
+                    args["data_scope_reasoning"] = (
+                        f"Auto-measured by engine: filter matched {real_count} rows"
+                    )
+
                 messages.append(_tool_msg(tc.id, json.dumps({"acknowledged": True})))
                 return _build_action(args)
 
@@ -591,16 +728,33 @@ def reassess_action(action: AgentAction, actual_rows: int) -> AgentAction:
 
 
 def _build_action(args: dict[str, Any]) -> AgentAction:
-    """Turn propose_action_tool arguments into an AgentAction."""
+    """Turn propose_action_tool arguments into an AgentAction.
+
+    Coerces data_scope and confidence to the right types in case the model
+    serialises them as strings (a known Groq/llama quirk).
+    """
     tool_name = args["tool_name"]
+
+    # Coerce numeric fields — llama-3.3 occasionally serialises integers and
+    # floats as JSON strings even when the schema says otherwise.
+    try:
+        data_scope = int(float(str(args.get("data_scope", 0))))
+    except (ValueError, TypeError):
+        data_scope = 0
+
+    try:
+        confidence = float(str(args.get("confidence", 0.9)))
+        confidence = max(0.0, min(1.0, confidence))
+    except (ValueError, TypeError):
+        confidence = 0.9
 
     # Build parameters dict from whichever keys the tool expects
     parameters: dict[str, Any] = {}
-    if "filter" in args and args.get("filter") is not None:
+    if args.get("filter"):
         parameters["filter"] = args["filter"]
-    if "invoice_no" in args and args.get("invoice_no"):
+    if args.get("invoice_no"):
         parameters["invoice_no"] = args["invoice_no"]
-    if "field" in args and args.get("field"):
+    if args.get("field"):
         parameters["field"] = args["field"]
     if "new_value" in args and args.get("new_value") is not None:
         parameters["new_value"] = args["new_value"]
@@ -614,11 +768,11 @@ def _build_action(args: dict[str, Any]) -> AgentAction:
         parameters=parameters,
         reversibility=args["reversibility"],
         reversibility_reasoning=args.get("reversibility_reasoning", ""),
-        data_scope=int(args["data_scope"]),
+        data_scope=data_scope,
         data_scope_reasoning=args.get("data_scope_reasoning", ""),
         regulatory_category=args["regulatory_category"],
         regulatory_reasoning=args.get("regulatory_reasoning", ""),
-        confidence=float(args["confidence"]),
+        confidence=confidence,
         confidence_reasoning=args.get("confidence_reasoning", ""),
         risk_band=args["risk_band"],
         severity=args.get("severity"),

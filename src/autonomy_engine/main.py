@@ -23,9 +23,7 @@ from pydantic import BaseModel, Field
 from autonomy_engine import audit_store, confirmation, executor, risk_scorer
 from autonomy_engine.agent_actions import (
     AgentActionError,
-    ClarificationRequest,
     propose_action,
-    reassess_action,
 )
 from autonomy_engine.logging_config import configure_logging
 from autonomy_engine.risk_scorer import RiskAssessment, build_assessment, route_action
@@ -74,16 +72,8 @@ app.add_middleware(
 
 
 class ProposeRequest(BaseModel):
-    user_request: str = Field(min_length=1, description="What the user asked the agent to do.")
-    session_id: str = Field(min_length=1, description="Groups actions into one audit trail.")
-    clarification: str | None = Field(
-        default=None,
-        description=(
-            "The user's answer to a question the agent asked on a previous "
-            "attempt. Sent back with the original request so the agent can "
-            "propose properly instead of guessing."
-        ),
-    )
+    user_request: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
 
 
 class ResolveConfirmationRequest(BaseModel):
@@ -225,51 +215,19 @@ async def propose(body: ProposeRequest, request: Request) -> dict:
     request.state.session_id = body.session_id
 
     context: dict[str, object] = {}
-    if body.clarification:
-        context["clarification from the user"] = body.clarification
 
-    outcome = propose_action(body.user_request, context)
+    action = propose_action(body.user_request, context)
 
-    # The agent may decline to act and ask instead. There is no action here, so
-    # there is nothing to preflight, band, route, queue or execute -- this
-    # returns before any of that machinery is reached. That ordering is the
-    # point: asking is cheaper than being stopped.
-    if isinstance(outcome, ClarificationRequest):
-        request.state.action_type = "clarification"
-        request.state.routing_decision = "needs_clarification"
-        logger.info(
-            "agent requested clarification",
-            extra={"session_id": body.session_id, "question": outcome.question},
-        )
-        return {
-            "routing_decision": "needs_clarification",
-            "question": outcome.question,
-            "why": outcome.why,
-            "options": outcome.options,
-        }
-
-    action = outcome
-
-    # Ground the band in what the action really touches, in three steps.
-    #
-    # 1. Ask the data, not the model, how many rows this hits. preflight is
-    #    strictly read-only, so it is safe on an action a human may reject.
+    # Ground the band in what the action really touches.
+    # preflight is strictly read-only — safe on an action a human may reject.
     scope = executor.preflight(action.tool_name, action.parameters)
-
-    # 2. If the model's estimate was materially wrong, its band answered the
-    #    wrong question. Hand it the true number and let it judge again --
-    #    the judgement stays the model's, only the premise is corrected.
-    if executor.is_scope_mismatch(action.data_scope, scope.actual_rows):
-        action = reassess_action(action, scope.actual_rows)
 
     assessment = build_assessment(action.to_risk_factors()).with_measured_scope(
         scope.actual_rows
     )
     decision = route_action(assessment)
 
-    # 3. Whatever the model concluded, true blast radius sets a floor on
-    #    supervision. This can only escalate. It is what stops a change to
-    #    thousands of rows executing unattended because it was described as small.
+    # Blast-radius floor — can only escalate, never lower supervision.
     decision, floor_note = risk_scorer.apply_blast_radius_floor(
         decision,
         actual_rows=scope.actual_rows,

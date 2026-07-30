@@ -13,6 +13,7 @@ import { RiskBreakdown, routingLabel } from "./RiskBreakdown";
 interface ActionResultProps {
   result: ProposeResponse;
   onResolved: () => void;
+  onClarify?: (answer: string) => void;
 }
 
 type ResolutionState =
@@ -21,9 +22,10 @@ type ResolutionState =
   | { phase: "done"; response: ResolveResponse }
   | { phase: "error"; message: string };
 
-export function ActionResult({ result, onResolved }: ActionResultProps) {
+export function ActionResult({ result, onResolved, onClarify }: ActionResultProps) {
   const [reviewer, setReviewer] = useState("");
   const [resolution, setResolution] = useState<ResolutionState>({ phase: "pending" });
+  const [clarifyAnswer, setClarifyAnswer] = useState("");
 
   async function handleConfirmation(decision: ConfirmationDecision) {
     if (result.routing_decision !== "confirm") return;
@@ -51,6 +53,56 @@ export function ActionResult({ result, onResolved }: ActionResultProps) {
     }
   }
 
+  // ── Clarification needed ─────────────────────────────────────────────
+  if (result.routing_decision === "needs_clarification") {
+    return (
+      <div className="action-result action-result--clarification">
+        <div className="action-result__header">
+          <span className="routing-badge" data-decision="clarification">
+            Needs clarification
+          </span>
+        </div>
+        <div className="action-result__body">
+          <p className="action-result__preview">{result.question}</p>
+          <p className="action-result__meta">{result.why}</p>
+          {result.options.length > 0 && (
+            <div className="clarification-options">
+              {result.options.map((opt) => (
+                <button
+                  key={opt}
+                  type="button"
+                  className="chip chip--option"
+                  onClick={() => setClarifyAnswer(opt)}
+                >
+                  {opt}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="clarification-input">
+            <input
+              type="text"
+              value={clarifyAnswer}
+              onChange={(e) => setClarifyAnswer(e.target.value)}
+              placeholder="Type your answer…"
+            />
+            <button
+              type="button"
+              className="button button--primary"
+              disabled={!clarifyAnswer.trim()}
+              onClick={() => onClarify?.(clarifyAnswer.trim())}
+            >
+              Answer
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── All other routing decisions have risk_score ──────────────────────
+  const score = "risk_score" in result ? result.risk_score : null;
+
   return (
     <div className={`action-result action-result--${result.routing_decision}`}>
       <div className="action-result__header">
@@ -59,7 +111,7 @@ export function ActionResult({ result, onResolved }: ActionResultProps) {
         </span>
       </div>
 
-      <RiskBreakdown score={result.risk_score} />
+      {score && <RiskBreakdown score={score} />}
 
       {/* ── LOW RISK: auto-executed ─────────────────────────────────── */}
       {result.routing_decision === "autonomous" && (
@@ -74,7 +126,6 @@ export function ActionResult({ result, onResolved }: ActionResultProps) {
       {result.routing_decision === "confirm" && (
         <div className="action-result__body">
           <p className="action-result__preview">{result.preview}</p>
-
           {resolution.phase === "done" ? (
             <AfterResolution response={resolution.response} />
           ) : (
@@ -100,7 +151,6 @@ export function ActionResult({ result, onResolved }: ActionResultProps) {
             ⚠ High risk — full review required
           </p>
           <p className="action-result__preview">{result.preview}</p>
-
           {resolution.phase === "done" ? (
             <AfterResolution response={resolution.response} />
           ) : (

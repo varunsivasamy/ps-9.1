@@ -270,6 +270,7 @@ input:focus, textarea:focus {
 .action-result--autonomous  { border-left-color: var(--green-text); }
 .action-result--confirm     { border-left-color: var(--amber-text); }
 .action-result--full_review { border-left-color: var(--red-text);   }
+.action-result--clarification { border-left-color: var(--blue-text); }
 
 .action-result__header { display: flex; align-items: center; }
 
@@ -315,9 +316,37 @@ input:focus, textarea:focus {
   padding: 0.18rem 0.5rem;
 }
 
-.routing-badge[data-decision="autonomous"] { background: var(--green-bg); color: var(--green-text); }
-.routing-badge[data-decision="confirm"]    { background: var(--amber-bg); color: var(--amber-text); }
-.routing-badge[data-decision="full_review"]{ background: var(--red-bg);   color: var(--red-text);   }
+.routing-badge[data-decision="autonomous"]     { background: var(--green-bg); color: var(--green-text); }
+.routing-badge[data-decision="confirm"]        { background: var(--amber-bg); color: var(--amber-text); }
+.routing-badge[data-decision="full_review"]    { background: var(--red-bg);   color: var(--red-text);   }
+.routing-badge[data-decision="clarification"]  { background: var(--blue-bg);  color: var(--blue-text);  }
+
+/* ── Clarification ───────────────────────────────────────────────────── */
+.clarification-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.chip--option {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.chip--option:hover {
+  background: var(--accent-dim);
+}
+
+.clarification-input {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.clarification-input input {
+  flex: 1;
+}
 
 /* ── Risk breakdown panel ────────────────────────────────────────────── */
 .risk-breakdown {

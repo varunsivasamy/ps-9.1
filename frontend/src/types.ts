@@ -51,10 +51,18 @@ export interface ProposeFullReviewResponse {
   preview: string;
 }
 
+export interface ProposeClarificationResponse {
+  routing_decision: "needs_clarification";
+  question: string;
+  why: string;
+  options: string[];
+}
+
 export type ProposeResponse =
   | ProposeAutonomousResponse
   | ProposeConfirmResponse
-  | ProposeFullReviewResponse;
+  | ProposeFullReviewResponse
+  | ProposeClarificationResponse;
 
 export type ConfirmationDecision = "confirm" | "reject";
 export type ReviewDecision = "approve" | "reject";
