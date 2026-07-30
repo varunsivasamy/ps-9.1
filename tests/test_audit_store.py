@@ -9,58 +9,100 @@ import pytest
 
 from autonomy_engine import audit_store, confirmation
 from autonomy_engine.agent_actions import AgentAction
-from autonomy_engine.risk_scorer import RiskFactors, score_action
+from autonomy_engine.risk_scorer import RiskFactors, build_assessment
 
 SESSION = "sess-demo-001"
 
 
 # --------------------------------------------------------------------------
 # Fixtures for the three demo scenarios
+#
+# These run against the real customer CSV (a throwaway copy, via the autouse
+# isolated_customer_data fixture), so the filters below name columns that
+# actually exist -- approving one of these now really executes it.
 # --------------------------------------------------------------------------
 
 
 def _action(kind):
-    """Build one of the three demo actions."""
+    """Build one of the demo actions.
+
+    These run against the real transaction schema (a throwaway copy, via the
+    autouse isolated_transaction_data fixture), so the filters below name
+    columns and values that actually exist -- approving one really executes it.
+    """
     if kind == "read":
         return AgentAction(
             action_type="read",
-            description="Read customer records matching: customer C-10482",
-            tool_name="query_customer_records",
-            parameters={"filter_description": "customer C-10482"},
+            description="Read transactions where category = 'Books'",
+            tool_name="query_transactions",
+            parameters={
+                "filter_description": "Books transactions",
+                "filter": [
+                    {"field": "category", "operator": "equals", "value": "Books"}
+                ],
+            },
             reversibility="reversible",
-            data_scope=1,
+            data_scope=12,
             regulatory_category="none",
             confidence=0.95,
+            risk_band="low",
+            severity=0.1,
+            rationale="a read of non-sensitive sales data",
         )
     if kind == "update":
         return AgentAction(
             action_type="single_record_write",
-            description="Set phone_number to '+44 20 7946 0958' on customer C-10482",
-            tool_name="update_customer_record",
+            description="Set payment_method to 'Cash' on invoice I757064",
+            tool_name="update_transaction",
             parameters={
-                "customer_id": "C-10482",
-                "field": "phone_number",
-                "new_value": "+44 20 7946 0958",
+                "invoice_no": "I757064",
+                "field": "payment_method",
+                "new_value": "Cash",
             },
             reversibility="partially_reversible",
             data_scope=1,
             regulatory_category="internal_sensitive",
             confidence=0.9,
+            risk_band="medium",
+            severity=0.45,
+            rationale="a reversible write to one transaction",
+        )
+    if kind == "delete_one":
+        return AgentAction(
+            action_type="single_record_delete",
+            description="PERMANENTLY DELETE invoice I757064 (1 row)",
+            tool_name="delete_transaction",
+            parameters={"invoice_no": "I757064"},
+            reversibility="irreversible",
+            data_scope=1,
+            regulatory_category="internal_sensitive",
+            confidence=0.92,
+            risk_band="medium",
+            severity=0.5,
+            rationale="irreversible but scoped to a single named invoice",
         )
     return AgentAction(
         action_type="bulk_delete",
-        description="PERMANENTLY DELETE all customer records matching: inactive EU since 2019",
-        tool_name="bulk_delete_records",
-        parameters={"filter_description": "inactive EU since 2019"},
+        description="PERMANENTLY DELETE all transactions where category = 'Clothing'",
+        tool_name="bulk_delete_transactions",
+        parameters={
+            "filter_description": "all Clothing transactions",
+            "filter": [
+                {"field": "category", "operator": "equals", "value": "Clothing"}
+            ],
+        },
         reversibility="irreversible",
-        data_scope=500,
+        data_scope=112,
         regulatory_category="regulated",
         confidence=0.6,
+        risk_band="high",
+        severity=0.9,
+        rationale="irreversible bulk deletion across thousands of rows",
     )
 
 
 def _score(kind):
-    return score_action(_action(kind).to_risk_factors())
+    return build_assessment(_action(kind).to_risk_factors())
 
 
 # --------------------------------------------------------------------------
@@ -134,7 +176,7 @@ def test_risk_breakdown_survives_the_round_trip(audit_table):
     fetched = audit_store.get_record(record["record_id"])
     assert fetched["risk_breakdown"] == score.breakdown
     assert "irreversible" in fetched["risk_breakdown"]["reversibility"]
-    assert "500 records" in fetched["risk_breakdown"]["data_scope"]
+    assert "112" in fetched["risk_breakdown"]["data_scope"]
 
 
 def test_breakdown_is_stored_as_a_json_string(audit_table):
@@ -241,7 +283,7 @@ def test_pending_queues_are_separate(audit_table):
     confirmation.create_review_request(
         _action("bulk_delete"), _score("bulk_delete"), session_id=SESSION
     )
-    confirmation.record_autonomous_execution(
+    confirmation.execute_autonomously(
         _action("read"), _score("read"), session_id=SESSION
     )
 
@@ -264,7 +306,7 @@ def test_resolved_items_leave_the_pending_queue(audit_table):
 
 
 def test_autonomous_executions_never_enter_a_queue(audit_table):
-    confirmation.record_autonomous_execution(
+    confirmation.execute_autonomously(
         _action("read"), _score("read"), session_id=SESSION
     )
     assert audit_store.list_pending_confirmations() == []
@@ -284,8 +326,8 @@ def test_confirmation_request_captures_the_action_preview(audit_table):
     assert record["status"] == "pending"
     assert record["routing_decision"] == "confirm"
     assert record["description"] == action.description
-    assert record["tool_name"] == "update_customer_record"
-    assert record["parameters"]["customer_id"] == "C-10482"
+    assert record["tool_name"] == "update_transaction"
+    assert record["parameters"]["invoice_no"] == "I757064"
 
 
 def test_review_request_is_pending_full_review(audit_table):
@@ -300,7 +342,7 @@ def test_review_request_is_pending_full_review(audit_table):
 
 def test_autonomous_execution_records_no_reviewer(audit_table):
     """No human was involved, and that absence is the thing worth auditing."""
-    record = confirmation.record_autonomous_execution(
+    record, _ = confirmation.execute_autonomously(
         _action("read"), _score("read"), session_id=SESSION
     )
     assert record["status"] == "auto_executed"
@@ -389,7 +431,7 @@ def test_a_record_cannot_be_resolved_twice(audit_table):
 
 def test_autonomous_record_cannot_be_resolved(audit_table):
     """Already executed -- there is nothing to approve."""
-    record = confirmation.record_autonomous_execution(
+    record, _ = confirmation.execute_autonomously(
         _action("read"), _score("read"), session_id=SESSION
     )
     with pytest.raises(audit_store.AuditStoreError):

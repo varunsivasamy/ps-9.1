@@ -243,6 +243,7 @@ def write_audit_record(
     description: str | None = None,
     tool_name: str | None = None,
     parameters: dict[str, Any] | None = None,
+    data_scope: int | None = None,
     timestamp: str | None = None,
 ) -> dict[str, Any]:
     """Persist one routing decision and return the stored record.
@@ -250,14 +251,18 @@ def write_audit_record(
     Args:
         session_id: Groups all actions in one user session; the partition key.
         action_type: Audit vocabulary for the kind of action, e.g. ``bulk_delete``.
-        composite_score: The weighted risk score, 0-1.
-        risk_breakdown: Per-dimension explanation from :class:`RiskScore`.
+        composite_score: Numeric severity consistent with the band the model
+            chose, 0-1. Presentational; the band is what routed the action.
+        risk_breakdown: Per-dimension explanation from :class:`RiskAssessment`.
         routing_decision: ``autonomous`` / ``confirm`` / ``full_review``.
         status: One of :data:`VALID_STATUSES`.
         reviewer: Who resolved it, if already resolved.
         description: Human-readable summary of the proposed action.
         tool_name: The tool the agent chose.
         parameters: Arguments for that tool call.
+        data_scope: The model's estimate of how many records it would affect.
+            Stored as its own attribute so that a review resolved hours later can
+            still check that estimate against what the filter really matches.
         timestamp: Override the sort key. Only for tests and backfills.
 
     Returns:
@@ -294,6 +299,8 @@ def write_audit_record(
         item["tool_name"] = tool_name
     if parameters is not None:
         item["parameters"] = parameters
+    if data_scope is not None:
+        item["data_scope"] = data_scope
 
     try:
         _table().put_item(Item=_to_dynamo(item))
@@ -413,6 +420,71 @@ def _explain_failed_condition(
         f"record {record_id} is already {record.get('status')!r} "
         f"(resolved by {record.get('reviewer')!r}); it cannot be resolved twice"
     )
+
+
+def record_execution(
+    record_id: str,
+    *,
+    execution_status: str,
+    detail: str,
+    result: dict[str, Any] | None = None,
+    snapshot: str | None = None,
+) -> dict[str, Any]:
+    """Attach the outcome of actually running an action to its audit record.
+
+    Kept separate from the lifecycle ``status`` on purpose. ``status`` answers
+    "was this authorised?" and ``execution_status`` answers "did it then work?".
+    Collapsing them would lose the case that matters most in a review: an action
+    a human approved that subsequently failed.
+
+    Args:
+        record_id: The record to annotate.
+        execution_status: ``success``, ``failed``, or ``skipped``.
+        detail: One-line human-readable outcome.
+        result: Structured result payload, stored as JSON.
+        snapshot: Path to the pre-write snapshot, if the action mutated data.
+            This is what an operator needs to roll the change back.
+
+    Returns:
+        The updated record.
+    """
+    session_id, timestamp = decode_record_id(record_id)
+
+    expression = "SET execution_status = :st, execution_detail = :detail, executed_at = :now"
+    values: dict[str, Any] = {
+        ":st": execution_status,
+        ":detail": detail,
+        ":now": utc_timestamp(),
+    }
+    if result is not None:
+        expression += ", execution_result = :result"
+        values[":result"] = json.dumps(result, default=str)
+    if snapshot is not None:
+        expression += ", snapshot_path = :snap"
+        values[":snap"] = snapshot
+
+    try:
+        response = _table().update_item(
+            Key={"session_id": session_id, "timestamp": timestamp},
+            UpdateExpression=expression,
+            ConditionExpression=Attr("session_id").exists(),
+            ExpressionAttributeValues=_to_dynamo(values),
+            ReturnValues="ALL_NEW",
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise RecordNotFoundError(f"no audit record with id {record_id}") from exc
+        raise AuditStoreError(f"failed to record execution for {record_id}: {exc}") from exc
+
+    logger.info(
+        "action executed",
+        extra={
+            "session_id": session_id,
+            "record_id": record_id,
+            "execution_status": execution_status,
+        },
+    )
+    return _hydrate(response["Attributes"])
 
 
 # --------------------------------------------------------------------------

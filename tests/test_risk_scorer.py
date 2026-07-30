@@ -1,269 +1,224 @@
-"""Tests for the risk scoring engine.
+"""Tests for the risk assessment and routing layer.
 
-The three headline scenarios here are the same three used in the customer demo:
-a read-only query, a single-record update, and a bulk delete. If these ever
-stop routing the way they do below, the demo narrative breaks.
+Since the model now decides the band, there is no arithmetic left to verify.
+What these tests pin down instead is the contract around that judgement: the
+band routes the action, the severity number is never allowed to contradict it,
+and the model's reasoning survives into the breakdown a reviewer reads.
 """
 
 import pytest
 
 from autonomy_engine.risk_scorer import (
-    DEFAULT_THRESHOLDS,
-    WEIGHT_CONFIDENCE,
-    WEIGHT_DATA_SCOPE,
-    WEIGHT_REGULATORY,
-    WEIGHT_REVERSIBILITY,
+    BAND_SEVERITY_RANGES,
+    BAND_TO_LEVEL,
     RiskFactors,
+    build_assessment,
+    describe_routing,
     route_action,
-    score_action,
 )
 
-# --------------------------------------------------------------------------
-# The three demo scenarios
-# --------------------------------------------------------------------------
 
-
-def test_read_only_query_routes_to_autonomous():
-    factors = RiskFactors(
+def factors(**overrides):
+    """A well-formed assessment, overridable per test."""
+    base = dict(
         reversibility="reversible",
+        reversibility_reasoning="read-only, changes nothing",
         data_scope=1,
+        data_scope_reasoning="single customer lookup",
         regulatory_category="none",
+        regulatory_reasoning="non-sensitive business data",
         confidence=0.95,
+        confidence_reasoning="request names the customer explicitly",
+        risk_band="low",
+        severity=0.1,
+        rationale="a single read of non-sensitive data",
     )
-    score = score_action(factors)
-    assert score.composite_score < 0.3
-    assert route_action(score, DEFAULT_THRESHOLDS) == "autonomous"
-    assert "reversible" in score.breakdown["reversibility"]
-
-
-def test_single_record_update_routes_to_confirm():
-    factors = RiskFactors(
-        reversibility="partially_reversible",
-        data_scope=1,
-        regulatory_category="internal_sensitive",
-        confidence=0.9,
-    )
-    score = score_action(factors)
-    assert 0.3 <= score.composite_score <= 0.7
-    assert route_action(score, DEFAULT_THRESHOLDS) == "confirm"
-    assert "partially reversible" in score.breakdown["reversibility"]
-    assert "internally sensitive" in score.breakdown["regulatory_category"]
-
-
-def test_bulk_delete_routes_to_full_review():
-    factors = RiskFactors(
-        reversibility="irreversible",
-        data_scope=500,
-        regulatory_category="regulated",
-        confidence=0.6,
-    )
-    score = score_action(factors)
-    assert score.composite_score > 0.7
-    assert route_action(score, DEFAULT_THRESHOLDS) == "full_review"
-    assert "irreversible" in score.breakdown["reversibility"]
-    assert "500 records" in score.breakdown["data_scope"]
+    base.update(overrides)
+    return RiskFactors(**base)
 
 
 # --------------------------------------------------------------------------
-# Threshold boundaries
+# Routing
 # --------------------------------------------------------------------------
-
-
-def test_score_exactly_on_low_threshold_routes_to_confirm():
-    """A score sitting exactly on `low` gets supervised, not waved through.
-
-    These factors are chosen to land on 0.3000 exactly:
-      0.5*0.35 + 0.1*0.25 + 0.1*0.25 + 0.5*0.15 = 0.175 + 0.025 + 0.025 + 0.075
-    """
-    factors = RiskFactors(
-        reversibility="partially_reversible",
-        data_scope=1,
-        regulatory_category="none",
-        confidence=0.5,
-    )
-    score = score_action(factors)
-    assert score.composite_score == pytest.approx(0.3)
-    assert route_action(score, DEFAULT_THRESHOLDS) == "confirm"
-
-
-def test_score_exactly_on_high_threshold_routes_to_confirm():
-    """Exactly at `high` is still a confirmation -- only strictly above escalates."""
-    factors = RiskFactors(
-        reversibility="irreversible",
-        data_scope=500,
-        regulatory_category="regulated",
-        confidence=0.6,
-    )
-    score = score_action(factors)
-    # Pin `high` to this action's exact composite (0.825) to sit on the boundary.
-    thresholds = {"low": 0.3, "high": score.composite_score}
-    assert route_action(score, thresholds) == "confirm"
-    # A hair below, and the same action escalates.
-    assert route_action(score, {"low": 0.3, "high": score.composite_score - 0.0001}) == "full_review"
-
-
-def test_thresholds_are_configurable():
-    """The same action routes differently under stricter thresholds."""
-    factors = RiskFactors(
-        reversibility="reversible",
-        data_scope=1,
-        regulatory_category="none",
-        confidence=0.95,
-    )
-    score = score_action(factors)
-    assert route_action(score, {"low": 0.3, "high": 0.7}) == "autonomous"
-    # A paranoid tenant that wants eyes on everything.
-    assert route_action(score, {"low": 0.0, "high": 0.05}) == "full_review"
-
-
-# --------------------------------------------------------------------------
-# Scoring mechanics
-# --------------------------------------------------------------------------
-
-
-def test_weights_sum_to_one():
-    total = WEIGHT_REVERSIBILITY + WEIGHT_DATA_SCOPE + WEIGHT_REGULATORY + WEIGHT_CONFIDENCE
-    assert total == pytest.approx(1.0)
-
-
-def test_confidence_is_inverted():
-    """High confidence must lower risk, low confidence must raise it."""
-    confident = score_action(
-        RiskFactors(
-            reversibility="reversible",
-            data_scope=1,
-            regulatory_category="none",
-            confidence=0.95,
-        )
-    )
-    unsure = score_action(
-        RiskFactors(
-            reversibility="reversible",
-            data_scope=1,
-            regulatory_category="none",
-            confidence=0.4,
-        )
-    )
-    assert confident.confidence_score == pytest.approx(0.05)
-    assert unsure.confidence_score == pytest.approx(0.6)
-    assert unsure.composite_score > confident.composite_score
 
 
 @pytest.mark.parametrize(
-    ("records", "expected"),
-    [
-        (0, 0.1),
-        (1, 0.1),
-        (2, 0.3),
-        (10, 0.3),
-        (11, 0.6),
-        (100, 0.6),
-        (101, 0.9),
-        (500, 0.9),
-        (1_000_000, 0.9),
-    ],
+    ("band", "expected"),
+    [("low", "autonomous"), ("medium", "confirm"), ("high", "full_review")],
 )
-def test_data_scope_buckets(records, expected):
-    score = score_action(
-        RiskFactors(
-            reversibility="reversible",
-            data_scope=records,
-            regulatory_category="none",
-            confidence=1.0,
-        )
-    )
-    assert score.data_scope_score == pytest.approx(expected)
+def test_band_determines_routing(band, expected):
+    """The band the model chose is the routing decision. Nothing else is consulted."""
+    assessment = build_assessment(factors(risk_band=band, severity=None))
+    assert route_action(assessment) == expected
 
 
-def test_composite_is_the_weighted_sum_of_its_parts():
-    score = score_action(
-        RiskFactors(
+def test_routing_ignores_the_four_dimensions():
+    """An irreversible, bulk, regulated, low-confidence action banded "low" still
+    routes autonomously.
+
+    This is the whole point of the redesign and deserves to be stated as a test
+    rather than discovered: the dimensions inform the model's judgement, they do
+    not override it. If this ever needs to fail, the design has changed.
+    """
+    assessment = build_assessment(
+        factors(
             reversibility="irreversible",
-            data_scope=50,
-            regulatory_category="internal_sensitive",
-            confidence=0.75,
-        )
-    )
-    expected = (
-        score.reversibility_score * WEIGHT_REVERSIBILITY
-        + score.data_scope_score * WEIGHT_DATA_SCOPE
-        + score.regulatory_score * WEIGHT_REGULATORY
-        + score.confidence_score * WEIGHT_CONFIDENCE
-    )
-    assert score.composite_score == pytest.approx(expected)
-
-
-def test_breakdown_covers_every_dimension():
-    score = score_action(
-        RiskFactors(
-            reversibility="irreversible",
-            data_scope=500,
+            data_scope=5000,
             regulatory_category="regulated",
-            confidence=0.6,
+            confidence=0.2,
+            risk_band="low",
+            severity=0.05,
         )
     )
-    assert set(score.breakdown) == {
+    assert route_action(assessment) == "autonomous"
+
+
+def test_every_band_maps_to_a_level():
+    """No band can be added without a routing target."""
+    assert set(BAND_TO_LEVEL) == set(BAND_SEVERITY_RANGES)
+
+
+# --------------------------------------------------------------------------
+# Severity reconciliation
+# --------------------------------------------------------------------------
+
+
+def test_severity_within_band_is_kept():
+    assessment = build_assessment(factors(risk_band="medium", severity=0.55))
+    assert assessment.composite_score == 0.55
+    assert assessment.severity_was_clamped is False
+
+
+def test_missing_severity_falls_back_to_band_midpoint():
+    assessment = build_assessment(factors(risk_band="high", severity=None))
+    low, high = BAND_SEVERITY_RANGES["high"]
+    assert low <= assessment.composite_score <= high
+    assert assessment.severity_was_clamped is False
+
+
+@pytest.mark.parametrize(
+    ("band", "severity"),
+    [("high", 0.05), ("low", 0.99), ("medium", 0.95), ("medium", 0.01)],
+)
+def test_severity_contradicting_the_band_is_clamped(band, severity):
+    """A model that reasons its way to a band then types a number from a
+    different one has contradicted itself; the band is the considered judgement
+    and wins, and the override is recorded rather than hidden."""
+    assessment = build_assessment(factors(risk_band=band, severity=severity))
+    low, high = BAND_SEVERITY_RANGES[band]
+
+    assert low <= assessment.composite_score <= high
+    assert assessment.severity_was_clamped is True
+    assert route_action(assessment) == BAND_TO_LEVEL[band]
+    assert "clamped" in assessment.breakdown["composite"]
+
+
+def test_clamping_never_changes_the_routing_decision():
+    """Clamping adjusts a display number, never where the action goes."""
+    for band in BAND_TO_LEVEL:
+        contradictory = build_assessment(factors(risk_band=band, severity=0.5))
+        assert route_action(contradictory) == BAND_TO_LEVEL[band]
+
+
+# --------------------------------------------------------------------------
+# Explainability
+# --------------------------------------------------------------------------
+
+
+def test_breakdown_carries_the_models_own_reasoning():
+    """The audit trail must show why, in the model's words -- not a
+    reconstruction from numbers."""
+    assessment = build_assessment(
+        factors(
+            risk_band="high",
+            severity=0.9,
+            reversibility="irreversible",
+            reversibility_reasoning="rows are deleted with no undo path",
+            data_scope=487,
+            data_scope_reasoning="filter matches every EU customer inactive since 2019",
+            regulatory_category="regulated",
+            regulatory_reasoning="EU residents, so GDPR applies",
+            confidence=0.6,
+            confidence_reasoning="'inactive' could mean churned or merely dormant",
+            rationale="irreversible bulk deletion of regulated data on an ambiguous filter",
+        )
+    )
+
+    assert "no undo path" in assessment.breakdown["reversibility"]
+    assert "487" in assessment.breakdown["data_scope"]
+    assert "GDPR" in assessment.breakdown["regulatory_category"]
+    assert "dormant" in assessment.breakdown["confidence"]
+    assert "HIGH" in assessment.breakdown["composite"]
+    assert "irreversible bulk deletion" in assessment.breakdown["composite"]
+
+
+def test_breakdown_covers_all_four_dimensions_plus_the_verdict():
+    assessment = build_assessment(factors())
+    assert set(assessment.breakdown) == {
         "reversibility",
         "data_scope",
         "regulatory_category",
         "confidence",
         "composite",
     }
-    # Every line must show its numeric contribution -- this is the audit trail.
-    for dimension in ("reversibility", "data_scope", "regulatory_category", "confidence"):
-        assert "raw" in score.breakdown[dimension]
-        assert "weight" in score.breakdown[dimension]
+
+
+def test_missing_reasoning_degrades_without_crashing():
+    """Reasoning is requested from the model but not structurally guaranteed.
+    A terse response should still produce a usable breakdown."""
+    assessment = build_assessment(
+        factors(
+            reversibility_reasoning="",
+            data_scope_reasoning="",
+            regulatory_reasoning="",
+            confidence_reasoning="",
+            rationale="",
+        )
+    )
+    assert assessment.breakdown["reversibility"] == "reversibility: reversible"
+    assert "LOW" in assessment.breakdown["composite"]
+
+
+def test_describe_routing_is_readable():
+    assessment = build_assessment(
+        factors(risk_band="high", severity=0.9, rationale="deletes regulated records")
+    )
+    summary = describe_routing(assessment, route_action(assessment))
+    assert "high risk" in summary
+    assert "deletes regulated records" in summary
+    assert summary.endswith("-> full_review")
 
 
 # --------------------------------------------------------------------------
-# Input validation and error handling
+# Validation
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"reversibility": "maybe"},                 # not one of the three literals
-        {"regulatory_category": "top_secret"},      # not one of the three literals
-        {"confidence": 1.5},                        # out of 0-1 range
-        {"confidence": -0.1},                       # out of 0-1 range
-        {"data_scope": -5},                         # negative record count
-    ],
-)
-def test_invalid_factors_are_rejected(kwargs):
-    base = {
-        "reversibility": "reversible",
-        "data_scope": 1,
-        "regulatory_category": "none",
-        "confidence": 0.9,
-    }
-    with pytest.raises(Exception):  # pydantic.ValidationError
-        RiskFactors(**{**base, **kwargs})
-
-
-def test_route_action_rejects_malformed_thresholds():
-    score = score_action(
+def test_band_is_required():
+    """A missing band must never quietly become "low" -- it is the routing decision."""
+    with pytest.raises(ValueError):
         RiskFactors(
             reversibility="reversible",
             data_scope=1,
             regulatory_category="none",
             confidence=0.9,
         )
-    )
-    with pytest.raises(ValueError, match="missing required key"):
-        route_action(score, {"low": 0.3})
-    with pytest.raises(ValueError, match="must not exceed"):
-        route_action(score, {"low": 0.8, "high": 0.2})
 
 
-def test_route_action_defaults_to_standard_thresholds():
-    """Omitting thresholds behaves the same as passing DEFAULT_THRESHOLDS."""
-    score = score_action(
-        RiskFactors(
-            reversibility="partially_reversible",
-            data_scope=1,
-            regulatory_category="internal_sensitive",
-            confidence=0.9,
-        )
-    )
-    assert route_action(score) == route_action(score, DEFAULT_THRESHOLDS) == "confirm"
+@pytest.mark.parametrize("bad", ["critical", "LOW", "", "safe"])
+def test_unknown_bands_are_rejected(bad):
+    with pytest.raises(ValueError):
+        factors(risk_band=bad)
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.1])
+def test_out_of_range_values_are_rejected(bad):
+    with pytest.raises(ValueError):
+        factors(confidence=bad)
+    with pytest.raises(ValueError):
+        factors(severity=bad)
+
+
+def test_negative_data_scope_is_rejected():
+    with pytest.raises(ValueError):
+        factors(data_scope=-1)

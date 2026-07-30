@@ -7,7 +7,7 @@ the Anthropic SDK, per the build plan) cannot be exercised live. This script is
 NOT part of the deployed system and is not imported by anything under src/ --
 it independently re-implements the same tool schemas and system prompt against
 Groq's OpenAI-compatible chat completions API, purely so we can see real LLM
-output flow through score_action() / route_action() before AWS credentials and
+output flow through build_assessment() / route_action() before AWS credentials and
 Anthropic credits are both available.
 
 Run: python scripts/demo_groq_check.py
@@ -26,132 +26,39 @@ from groq import Groq
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from autonomy_engine.risk_scorer import (  # noqa: E402
-    DEFAULT_THRESHOLDS,
     RiskFactors,
+    build_assessment,
     describe_routing,
     route_action,
-    score_action,
 )
 
 load_dotenv()
 
 MODEL = "llama-3.3-70b-versatile"
 
-SYSTEM_PROMPT = """\
-You are an AI agent operating inside a graduated autonomy engine. You have access
-to customer-data tools. Choose exactly one tool call that fulfils the user's request.
+# The prompt and tool schemas come straight from the engine rather than being
+# copied here. They previously were, and a copy is exactly how a check script
+# ends up validating a schema the engine no longer uses -- the self_assessment
+# block has since grown a required risk_band, and only one of the two copies
+# would have gained it.
+from autonomy_engine.agent_actions import (  # noqa: E402
+    SYSTEM_PROMPT,
+    TOOL_SCHEMAS,
+    _to_openai_tools,
+)
 
-Alongside the tool's own parameters, every tool requires a `self_assessment` object.
-This is not paperwork -- it determines whether your action runs automatically,
-pauses for a one-click human confirmation, or is blocked pending full human review.
-Fill it in honestly:
-
-- reversibility: "reversible" (a read, or a cleanly-rollback-able change),
-  "partially_reversible" (revertible but may lose history), or "irreversible"
-  (a deletion or external side effect that cannot be undone).
-- data_scope: your best estimate of how many records or users the action affects.
-  A single-record lookup is 1. If the request implies "all" or a broad filter,
-  estimate honestly rather than guessing low.
-- regulatory_category: "none" (non-sensitive business data), "internal_sensitive"
-  (internal/personal data, not externally regulated), or "regulated" (data under
-  a regime such as GDPR, HIPAA, or PCI).
-- confidence: 0.0-1.0, how sure you are this specific tool call is the correct
-  interpretation of the request. Understating your uncertainty is the more
-  dangerous error: low confidence raises the risk score and pulls a human in.
-
-Do not inflate or deflate these to influence the routing outcome.
-"""
-
-SELF_ASSESSMENT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "reversibility": {
-            "type": "string",
-            "enum": ["reversible", "partially_reversible", "irreversible"],
-        },
-        "data_scope": {"type": "integer"},
-        "regulatory_category": {
-            "type": "string",
-            "enum": ["none", "internal_sensitive", "regulated"],
-        },
-        "confidence": {"type": "number"},
-    },
-    "required": ["reversibility", "data_scope", "regulatory_category", "confidence"],
-}
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "query_customer_records",
-            "description": (
-                "Read-only lookup of customer records. Returns data but changes "
-                "nothing. Use for questions about existing customers, their "
-                "orders, or their status."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filter_description": {
-                        "type": "string",
-                        "description": "Which records to retrieve, in plain language.",
-                    },
-                    "self_assessment": SELF_ASSESSMENT_SCHEMA,
-                },
-                "required": ["filter_description", "self_assessment"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_customer_record",
-            "description": (
-                "Write a new value to one field on one customer record. Affects "
-                "exactly one record."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "customer_id": {"type": "string"},
-                    "field": {"type": "string"},
-                    "new_value": {"type": "string"},
-                    "self_assessment": SELF_ASSESSMENT_SCHEMA,
-                },
-                "required": ["customer_id", "field", "new_value", "self_assessment"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "bulk_delete_records",
-            "description": (
-                "Permanently delete every customer record matching a filter. "
-                "Destructive and NOT recoverable. Can affect many records at once."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filter_description": {"type": "string"},
-                    "self_assessment": SELF_ASSESSMENT_SCHEMA,
-                },
-                "required": ["filter_description", "self_assessment"],
-            },
-        },
-    },
-]
+TOOLS = _to_openai_tools(TOOL_SCHEMAS)
 
 SCENARIOS = [
-    ("A. read-only query", "What's the current email address on file for customer C-10482?"),
+    ("A. aggregate read", "Which product category made the most revenue?"),
     (
-        "B. single-record update",
-        "Update customer C-10482's phone number to +44 20 7946 0958.",
+        "B. single-invoice delete",
+        "Delete invoice I138884 from the database, it was entered by mistake.",
     ),
     (
         "C. bulk delete",
-        "Purge all 500 EU customer records that have been inactive since 2019 "
-        "to satisfy a GDPR erasure request.",
+        "Purge every Clothing transaction from the database "
+        "to satisfy a data retention policy.",
     ),
 ]
 
@@ -212,19 +119,26 @@ def main() -> None:
         try:
             factors = RiskFactors(
                 reversibility=assessment["reversibility"],
+                reversibility_reasoning=assessment.get("reversibility_reasoning", ""),
                 data_scope=assessment["data_scope"],
+                data_scope_reasoning=assessment.get("data_scope_reasoning", ""),
                 regulatory_category=assessment["regulatory_category"],
+                regulatory_reasoning=assessment.get("regulatory_reasoning", ""),
                 confidence=assessment["confidence"],
+                confidence_reasoning=assessment.get("confidence_reasoning", ""),
+                risk_band=assessment["risk_band"],
+                severity=assessment.get("severity"),
+                rationale=assessment.get("rationale", ""),
             )
         except Exception as exc:  # noqa: BLE001
             print(f"  FAILED: self_assessment did not validate: {exc}")
             all_ok = False
             continue
 
-        score = score_action(factors)
-        decision = route_action(score, DEFAULT_THRESHOLDS)
-        print(f"  composite_score  {score.composite_score}")
-        print(f"  routing          {describe_routing(score, decision)}")
+        judged = build_assessment(factors)
+        decision = route_action(judged)
+        print(f"  risk_band        {judged.risk_band}")
+        print(f"  routing          {describe_routing(judged, decision)}")
 
     print("\n" + "=" * 78)
     if all_ok:

@@ -13,16 +13,24 @@ enforced all the way down in :func:`audit_store.resolve_record`, whose
 conditional write refuses a record whose ``routing_decision`` does not match the
 queue being used.
 
-Pure functions only -- no web framework here. That arrives in Phase 4.
+This module also owns the moment an action becomes real. Approving a queued item
+does not merely stamp it approved -- it runs it, via :mod:`executor`, against the
+transaction store. Rejection runs nothing. Together with
+:func:`execute_autonomously`, these are the only three doors to the executor, so
+"what is allowed to touch the data, and on whose authority" is a question
+answered entirely within this file.
+
+No web framework here; that lives in :mod:`main`.
 """
 
 from __future__ import annotations
 
 from typing import Any, Final
 
-from autonomy_engine import audit_store
+from autonomy_engine import audit_store, executor
 from autonomy_engine.agent_actions import AgentAction
-from autonomy_engine.risk_scorer import RiskScore
+from autonomy_engine.executor import ExecutionResult
+from autonomy_engine.risk_scorer import RiskAssessment
 
 #: Decisions each queue accepts, mapped to the status they write.
 CONFIRMATION_DECISIONS: Final[dict[str, str]] = {
@@ -34,6 +42,12 @@ REVIEW_DECISIONS: Final[dict[str, str]] = {
     "approve": audit_store.STATUS_REVIEWED,
     "reject": audit_store.STATUS_REJECTED,
 }
+
+#: Statuses that authorise execution. A rejected action is never run, and this
+#: set is the single place that fact is encoded.
+EXECUTING_STATUSES: Final[frozenset[str]] = frozenset(
+    {audit_store.STATUS_CONFIRMED, audit_store.STATUS_REVIEWED}
+)
 
 
 class InvalidDecisionError(ValueError):
@@ -47,15 +61,19 @@ class InvalidDecisionError(ValueError):
 
 def create_confirmation_request(
     action: AgentAction,
-    score: RiskScore,
+    assessment: RiskAssessment,
     *,
     session_id: str,
 ) -> str:
     """Queue a medium-risk action for one-click confirmation.
 
+    Nothing is executed here. The action is parked until a human resolves it
+    through :func:`resolve_confirmation`, which is where execution happens.
+
     Args:
         action: The action the agent proposed.
-        score: Its risk score, including the breakdown that justified routing here.
+        assessment: Its risk assessment, including the reasoning that justified
+            routing here.
         session_id: Session the action belongs to.
 
     Returns:
@@ -64,20 +82,21 @@ def create_confirmation_request(
     record = audit_store.write_audit_record(
         session_id=session_id,
         action_type=action.action_type,
-        composite_score=score.composite_score,
-        risk_breakdown=score.breakdown,
+        composite_score=assessment.composite_score,
+        risk_breakdown=assessment.breakdown,
         routing_decision=audit_store.ROUTING_CONFIRM,
         status=audit_store.STATUS_PENDING,
         description=action.description,
         tool_name=action.tool_name,
         parameters=action.parameters,
+        data_scope=action.data_scope,
     )
     return record["record_id"]
 
 
 def create_review_request(
     action: AgentAction,
-    score: RiskScore,
+    assessment: RiskAssessment,
     *,
     session_id: str,
 ) -> str:
@@ -85,6 +104,7 @@ def create_review_request(
 
     Same shape as :func:`create_confirmation_request`, different queue -- the
     ``routing_decision`` stored on the record is what keeps the two apart.
+    Nothing is executed until :func:`resolve_review` approves it.
 
     Returns:
         The ``review_id`` to pass back to :func:`resolve_review`.
@@ -92,39 +112,65 @@ def create_review_request(
     record = audit_store.write_audit_record(
         session_id=session_id,
         action_type=action.action_type,
-        composite_score=score.composite_score,
-        risk_breakdown=score.breakdown,
+        composite_score=assessment.composite_score,
+        risk_breakdown=assessment.breakdown,
         routing_decision=audit_store.ROUTING_FULL_REVIEW,
         status=audit_store.STATUS_PENDING,
         description=action.description,
         tool_name=action.tool_name,
         parameters=action.parameters,
+        data_scope=action.data_scope,
     )
     return record["record_id"]
 
 
-def record_autonomous_execution(
+def execute_autonomously(
     action: AgentAction,
-    score: RiskScore,
+    assessment: RiskAssessment,
     *,
     session_id: str,
-) -> dict[str, Any]:
-    """Log a low-risk action that ran without a human.
+) -> tuple[dict[str, Any], ExecutionResult]:
+    """Run a low-risk action immediately, with no human in the loop.
 
-    Written with status ``auto_executed`` and no reviewer, because there was no
+    The audit record is written *before* the action runs, for two reasons: its
+    id is the snapshot tag, so a mutation cannot happen without a named
+    rollback point already existing; and if execution then dies mid-flight, the
+    attempt is already on the record rather than vanishing.
+
+    Logged with status ``auto_executed`` and no reviewer, because there was no
     human in the loop -- that absence is itself the thing worth auditing.
+
+    Returns:
+        ``(audit_record, execution_result)``. The record is the post-execution
+        one, carrying the outcome.
     """
-    return audit_store.write_audit_record(
+    record = audit_store.write_audit_record(
         session_id=session_id,
         action_type=action.action_type,
-        composite_score=score.composite_score,
-        risk_breakdown=score.breakdown,
+        composite_score=assessment.composite_score,
+        risk_breakdown=assessment.breakdown,
         routing_decision=audit_store.ROUTING_AUTONOMOUS,
         status=audit_store.STATUS_AUTO_EXECUTED,
         description=action.description,
         tool_name=action.tool_name,
         parameters=action.parameters,
+        data_scope=action.data_scope,
     )
+
+    result = executor.execute(
+        action.tool_name,
+        action.parameters,
+        record_id=record["record_id"],
+        claimed_scope=action.data_scope,
+    )
+    updated = audit_store.record_execution(
+        record["record_id"],
+        execution_status=result.status,
+        detail=result.detail,
+        result=result.to_payload(),
+        snapshot=result.snapshot,
+    )
+    return updated, result
 
 
 # --------------------------------------------------------------------------
@@ -145,7 +191,8 @@ def resolve_confirmation(
         reviewer: Who decided. Recorded on the audit record.
 
     Returns:
-        The updated audit record.
+        The updated audit record. On ``"confirm"`` the action has been executed
+        by the time this returns, and the record carries the outcome.
 
     Raises:
         InvalidDecisionError: ``decision`` is not valid for this queue.
@@ -155,7 +202,7 @@ def resolve_confirmation(
             the review queue rather than the confirmation queue.
     """
     new_status = _validate_decision(decision, CONFIRMATION_DECISIONS, "confirmation")
-    return audit_store.resolve_record(
+    return _resolve_and_maybe_execute(
         confirmation_id,
         new_status=new_status,
         reviewer=reviewer,
@@ -176,7 +223,8 @@ def resolve_review(
         reviewer: Who decided. Recorded on the audit record.
 
     Returns:
-        The updated audit record.
+        The updated audit record. On ``"approve"`` the action has been executed
+        by the time this returns, and the record carries the outcome.
 
     Raises:
         InvalidDecisionError: ``decision`` is not valid for this queue. Note that
@@ -188,11 +236,72 @@ def resolve_review(
             the confirmation queue rather than the review queue.
     """
     new_status = _validate_decision(decision, REVIEW_DECISIONS, "review")
-    return audit_store.resolve_record(
+    return _resolve_and_maybe_execute(
         review_id,
         new_status=new_status,
         reviewer=reviewer,
         expected_routing=audit_store.ROUTING_FULL_REVIEW,
+    )
+
+
+def _resolve_and_maybe_execute(
+    record_id: str,
+    *,
+    new_status: str,
+    reviewer: str,
+    expected_routing: str,
+) -> dict[str, Any]:
+    """Resolve a queued action and, if it was approved, run it.
+
+    The order is deliberate and not interchangeable: the status is written
+    first, through :func:`audit_store.resolve_record`'s conditional write, and
+    only a record that write actually moved out of ``pending`` gets executed.
+    That is what makes a double-click harmless -- the second call fails the
+    condition and raises, so it can never reach the executor and delete the same
+    rows twice.
+
+    A rejection returns here untouched: :data:`EXECUTING_STATUSES` gates the
+    call, so nothing runs.
+
+    Returns:
+        The audit record, carrying the execution outcome if one occurred.
+    """
+    record = audit_store.resolve_record(
+        record_id,
+        new_status=new_status,
+        reviewer=reviewer,
+        expected_routing=expected_routing,
+    )
+
+    if new_status not in EXECUTING_STATUSES:
+        return audit_store.record_execution(
+            record_id,
+            execution_status="skipped",
+            detail=f"Rejected by {reviewer}; the action was not executed.",
+        )
+
+    tool_name = record.get("tool_name")
+    if not tool_name:
+        # Pre-execution records (or a hand-written row) carry no tool to run.
+        # Approving one is not an error, but it must not look like a success.
+        return audit_store.record_execution(
+            record_id,
+            execution_status="skipped",
+            detail="Approved, but the record carries no tool call to execute.",
+        )
+
+    result = executor.execute(
+        tool_name,
+        record.get("parameters") or {},
+        record_id=record_id,
+        claimed_scope=record.get("data_scope"),
+    )
+    return audit_store.record_execution(
+        record_id,
+        execution_status=result.status,
+        detail=result.detail,
+        result=result.to_payload(),
+        snapshot=result.snapshot,
     )
 
 

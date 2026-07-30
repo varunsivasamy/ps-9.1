@@ -1,7 +1,7 @@
 fastapi
 mangum
 boto3
-anthropic
+groq
 pydantic
 pytest
 python-dotenv
@@ -10,9 +10,4 @@ uvicorn
 # Test-only dependencies
 httpx        # required by fastapi.testclient
 moto[dynamodb]  # mock AWS for audit store tests
-
-# Local demo only -- not used by the deployed Lambda. Lets scripts/demo_groq_check.py
-# and AGENT_LLM_PROVIDER=groq exercise the pipeline while the Anthropic account
-# has no API credits. Safe to skip in a production install.
-groq
 moto[server]  # standalone DynamoDB mock server for a real localhost demo run

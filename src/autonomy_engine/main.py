@@ -10,18 +10,25 @@ and never leaks a raw stack trace to the caller.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Literal
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from autonomy_engine import audit_store, confirmation
-from autonomy_engine.agent_actions import AgentActionError, propose_action
+from autonomy_engine import audit_store, confirmation, executor, risk_scorer
+from autonomy_engine.agent_actions import (
+    AgentActionError,
+    ClarificationRequest,
+    propose_action,
+    reassess_action,
+)
 from autonomy_engine.logging_config import configure_logging
-from autonomy_engine.risk_scorer import DEFAULT_THRESHOLDS, route_action, score_action
+from autonomy_engine.risk_scorer import RiskAssessment, build_assessment, route_action
 
 configure_logging()
 logger = logging.getLogger("autonomy_engine")
@@ -35,6 +42,31 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# --------------------------------------------------------------------------
+# CORS
+#
+# The React front end is served from a different origin (localhost:5173 in
+# dev, a Vercel domain in production), so the browser needs an explicit
+# allow-list rather than the default same-origin policy. Comma-separated list
+# in CORS_ALLOWED_ORIGINS; defaults to the two Vite dev ports so local
+# development works with zero configuration.
+# --------------------------------------------------------------------------
+
+_default_origins = "http://localhost:5173,http://127.0.0.1:5173"
+_allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", _default_origins).split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # --------------------------------------------------------------------------
 # Request/response bodies
@@ -44,6 +76,14 @@ app = FastAPI(
 class ProposeRequest(BaseModel):
     user_request: str = Field(min_length=1, description="What the user asked the agent to do.")
     session_id: str = Field(min_length=1, description="Groups actions into one audit trail.")
+    clarification: str | None = Field(
+        default=None,
+        description=(
+            "The user's answer to a question the agent asked on a previous "
+            "attempt. Sent back with the original request so the agent can "
+            "propose properly instead of guessing."
+        ),
+    )
 
 
 class ResolveConfirmationRequest(BaseModel):
@@ -124,6 +164,14 @@ async def _handle_audit_error(request: Request, exc: audit_store.AuditStoreError
     return _error_response(status, message)
 
 
+@app.exception_handler(executor.ExecutionError)
+async def _handle_execution_error(request: Request, exc: executor.ExecutionError) -> JSONResponse:
+    # A tool with no execution branch is a wiring bug on our side, not the
+    # caller's -- 500, and loud enough to notice.
+    logger.error("execution wiring error", extra={"path": request.url.path})
+    return _error_response(500, str(exc))
+
+
 @app.exception_handler(Exception)
 async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
     # Last resort: never let a raw traceback reach the caller.
@@ -163,51 +211,115 @@ async def _log_requests(request: Request, call_next):
 
 @app.post("/actions/propose")
 async def propose(body: ProposeRequest, request: Request) -> dict:
-    """Propose an action, score its risk, and route it.
+    """Propose an action, let the agent judge its risk, and route it.
 
-    - autonomous: executes immediately (a mock success result for the demo),
-      logged as auto_executed.
-    - confirm: creates a pending confirmation, returns a human-readable preview.
-    - full_review: creates a pending review entry.
+    - needs_clarification: the agent could not safely interpret the request and
+      asked a question instead. Nothing is scored, queued, or executed.
+    - autonomous: executes against the customer store immediately, logged as
+      auto_executed with the real outcome.
+    - confirm: creates a pending confirmation and executes nothing until a human
+      resolves it.
+    - full_review: creates a pending review entry and executes nothing until a
+      human approves it.
     """
     request.state.session_id = body.session_id
 
-    action = propose_action(body.user_request, {})
-    score = score_action(action.to_risk_factors())
-    decision = route_action(score, DEFAULT_THRESHOLDS)
+    context: dict[str, object] = {}
+    if body.clarification:
+        context["clarification from the user"] = body.clarification
+
+    outcome = propose_action(body.user_request, context)
+
+    # The agent may decline to act and ask instead. There is no action here, so
+    # there is nothing to preflight, band, route, queue or execute -- this
+    # returns before any of that machinery is reached. That ordering is the
+    # point: asking is cheaper than being stopped.
+    if isinstance(outcome, ClarificationRequest):
+        request.state.action_type = "clarification"
+        request.state.routing_decision = "needs_clarification"
+        logger.info(
+            "agent requested clarification",
+            extra={"session_id": body.session_id, "question": outcome.question},
+        )
+        return {
+            "routing_decision": "needs_clarification",
+            "question": outcome.question,
+            "why": outcome.why,
+            "options": outcome.options,
+        }
+
+    action = outcome
+
+    # Ground the band in what the action really touches, in three steps.
+    #
+    # 1. Ask the data, not the model, how many rows this hits. preflight is
+    #    strictly read-only, so it is safe on an action a human may reject.
+    scope = executor.preflight(action.tool_name, action.parameters)
+
+    # 2. If the model's estimate was materially wrong, its band answered the
+    #    wrong question. Hand it the true number and let it judge again --
+    #    the judgement stays the model's, only the premise is corrected.
+    if executor.is_scope_mismatch(action.data_scope, scope.actual_rows):
+        action = reassess_action(action, scope.actual_rows)
+
+    assessment = build_assessment(action.to_risk_factors()).with_measured_scope(
+        scope.actual_rows
+    )
+    decision = route_action(assessment)
+
+    # 3. Whatever the model concluded, true blast radius sets a floor on
+    #    supervision. This can only escalate. It is what stops a change to
+    #    thousands of rows executing unattended because it was described as small.
+    decision, floor_note = risk_scorer.apply_blast_radius_floor(
+        decision,
+        actual_rows=scope.actual_rows,
+        is_mutation=scope.is_mutation,
+        is_destructive=scope.is_destructive,
+        resolvable=scope.resolvable,
+    )
+    if floor_note:
+        logger.warning(
+            "blast-radius floor escalated routing",
+            extra={
+                "session_id": body.session_id,
+                "tool_name": action.tool_name,
+                "actual_rows": scope.actual_rows,
+                "final_decision": decision,
+            },
+        )
+        assessment = assessment.with_override(floor_note)
 
     request.state.action_type = action.action_type
     request.state.routing_decision = decision
 
     if decision == "autonomous":
-        record = confirmation.record_autonomous_execution(
-            action, score, session_id=body.session_id
+        record, result = confirmation.execute_autonomously(
+            action, assessment, session_id=body.session_id
         )
         return {
             "routing_decision": decision,
-            "risk_score": _score_payload(score),
-            "result": {
-                "status": "success",
-                "detail": f"Executed automatically: {action.description}",
-            },
+            "risk_score": _score_payload(assessment),
+            "result": result.to_payload(),
             "audit_record_id": record["record_id"],
         }
 
     if decision == "confirm":
         confirmation_id = confirmation.create_confirmation_request(
-            action, score, session_id=body.session_id
+            action, assessment, session_id=body.session_id
         )
         return {
             "routing_decision": decision,
-            "risk_score": _score_payload(score),
+            "risk_score": _score_payload(assessment),
             "confirmation_id": confirmation_id,
             "preview": action.description,
         }
 
-    review_id = confirmation.create_review_request(action, score, session_id=body.session_id)
+    review_id = confirmation.create_review_request(
+        action, assessment, session_id=body.session_id
+    )
     return {
         "routing_decision": decision,
-        "risk_score": _score_payload(score),
+        "risk_score": _score_payload(assessment),
         "review_id": review_id,
         "preview": action.description,
     }
@@ -217,22 +329,22 @@ async def propose(body: ProposeRequest, request: Request) -> dict:
 async def resolve_confirmation_endpoint(
     confirmation_id: str, body: ResolveConfirmationRequest, request: Request
 ) -> dict:
-    """Resolve a pending medium-risk confirmation."""
+    """Resolve a pending medium-risk confirmation, executing it if confirmed."""
     record = confirmation.resolve_confirmation(confirmation_id, body.decision, body.reviewer)
     request.state.session_id = record.get("session_id")
     request.state.routing_decision = record.get("routing_decision")
-    return {"status": record["status"], "reviewer": record["reviewer"]}
+    return _resolution_payload(record)
 
 
 @app.post("/reviews/{review_id}/resolve")
 async def resolve_review_endpoint(
     review_id: str, body: ResolveReviewRequest, request: Request
 ) -> dict:
-    """Resolve a pending high-risk review."""
+    """Resolve a pending high-risk review, executing it if approved."""
     record = confirmation.resolve_review(review_id, body.decision, body.reviewer)
     request.state.session_id = record.get("session_id")
     request.state.routing_decision = record.get("routing_decision")
-    return {"status": record["status"], "reviewer": record["reviewer"]}
+    return _resolution_payload(record)
 
 
 @app.get("/audit/{session_id}")
@@ -258,10 +370,33 @@ async def health() -> dict:
 # --------------------------------------------------------------------------
 
 
-def _score_payload(score) -> dict:
+def _score_payload(assessment: RiskAssessment) -> dict:
     return {
-        "composite_score": score.composite_score,
-        "breakdown": score.breakdown,
+        "risk_band": assessment.risk_band,
+        "composite_score": assessment.composite_score,
+        "rationale": assessment.rationale,
+        "severity_was_clamped": assessment.severity_was_clamped,
+        # Surfaced, not hidden: if the engine overrode the agent, the caller and
+        # the reviewer both need to know that is what happened.
+        "escalated_by_floor": assessment.escalated_by_floor,
+        "actual_rows": assessment.actual_rows,
+        "breakdown": assessment.breakdown,
+    }
+
+
+def _resolution_payload(record: dict) -> dict:
+    """What a reviewer gets back after deciding: the decision *and* its effect.
+
+    ``status`` is the authorisation outcome and ``execution_status`` is whether
+    the action then worked. Both are returned because a reviewer who clicks
+    approve needs to know if the deletion actually happened.
+    """
+    return {
+        "status": record["status"],
+        "reviewer": record["reviewer"],
+        "execution_status": record.get("execution_status"),
+        "execution_detail": record.get("execution_detail"),
+        "snapshot_path": record.get("snapshot_path"),
     }
 
 
@@ -276,4 +411,6 @@ def _trail_entry(record: dict) -> dict:
         "reviewer": record.get("reviewer"),
         "composite_score": record.get("composite_score"),
         "risk_breakdown": record.get("risk_breakdown"),
+        "execution_status": record.get("execution_status"),
+        "execution_detail": record.get("execution_detail"),
     }
