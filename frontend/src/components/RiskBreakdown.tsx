@@ -1,10 +1,9 @@
 import type { RiskScorePayload, RoutingDecision } from "../types";
 
 const LABELS: Record<RoutingDecision, string> = {
-  autonomous:           "Autonomous — low risk",
-  confirm:              "Confirmation needed — medium risk",
-  full_review:          "Full review required — high risk",
-  needs_clarification:  "Needs clarification",
+  autonomous:  "Autonomous — low risk",
+  confirm:     "Confirmation needed — medium risk",
+  full_review: "Full review required — high risk",
 };
 
 export function routingLabel(decision: RoutingDecision): string {
