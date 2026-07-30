@@ -1,11 +1,11 @@
-# PS-9.1 — Graduated Autonomy Engine
+﻿# PS-9.1 â€” Graduated Autonomy Engine
 
 A risk-routing layer for AI agents. Today an agent action is either fully
-autonomous or fully gated by a human — there is no middle. PS-9.1 dynamically
+autonomous or fully gated by a human â€” there is no middle. PS-9.1 dynamically
 scores every proposed agent action on a risk dimension (reversibility, data
 scope, regulatory category, and the model's own self-reported confidence) and
 routes it to the appropriate autonomy level: **autonomous** for low risk,
-**confirm** — preview then one-click approval — for medium risk, and **full
+**confirm** â€” preview then one-click approval â€” for medium risk, and **full
 review** by a human for high risk. Every routing decision is persisted with its
 complete risk score breakdown, so any decision the system made can be explained
 after the fact.
@@ -15,45 +15,45 @@ after the fact.
 ## Architecture
 
 ```
-                          ┌──────────────────────────────┐
-   user request  ───────► │  POST /actions/propose        │
-                          │  (FastAPI, src/.../main.py)   │
-                          └───────────────┬───────────────┘
-                                          │
-                          ┌───────────────▼───────────────┐
-                          │  agent_actions.propose_action │
-                          │  Anthropic API + tool use     │
-                          │  → AgentAction (+ confidence) │
-                          └───────────────┬───────────────┘
-                                          │
-                          ┌───────────────▼───────────────┐
-                          │  risk_scorer.score_action     │
-                          │  reversibility     35%        │
-                          │  data_scope        25%        │
-                          │  regulatory        25%        │
-                          │  1 - confidence    15%        │
-                          │  → composite_score + breakdown│
-                          └───────────────┬───────────────┘
-                                          │
-                          ┌───────────────▼───────────────┐
-                          │  risk_scorer.route_action     │
-                          │  score < 0.3   → autonomous   │
-                          │  0.3 – 0.7     → confirm      │
-                          │  score > 0.7   → full_review  │
-                          └───┬───────────┬───────────┬───┘
-                              │           │           │
-                  ┌───────────▼──┐ ┌──────▼──────┐ ┌──▼─────────────┐
-                  │ execute now  │ │ confirmation│ │ human review   │
-                  │ auto_executed│ │ queue       │ │ queue          │
-                  └───────────┬──┘ └──────┬──────┘ └──┬─────────────┘
-                              │           │           │
-                          ┌───▼───────────▼───────────▼───┐
-                          │  audit_store (DynamoDB)       │
-                          │  <prefix>-audit-log           │
-                          │  PK session_id / SK timestamp │
-                          │  full risk breakdown per row  │
-                          └───────────────┬───────────────┘
-                                          │
+                          â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+   user request  â”€â”€â”€â”€â”€â”€â”€â–º â”‚  POST /actions/propose        â”‚
+                          â”‚  (FastAPI, src/.../main.py)   â”‚
+                          â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                                          â”‚
+                          â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                          â”‚  agent_actions.propose_action â”‚
+                          â”‚  Anthropic API + tool use     â”‚
+                          â”‚  â†’ AgentAction (+ confidence) â”‚
+                          â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                                          â”‚
+                          â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                          â”‚  risk_scorer.score_action     â”‚
+                          â”‚  reversibility     35%        â”‚
+                          â”‚  data_scope        25%        â”‚
+                          â”‚  regulatory        25%        â”‚
+                          â”‚  1 - confidence    15%        â”‚
+                          â”‚  â†’ composite_score + breakdownâ”‚
+                          â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                                          â”‚
+                          â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                          â”‚  risk_scorer.route_action     â”‚
+                          â”‚  score < 0.3   â†’ autonomous   â”‚
+                          â”‚  0.3 â€“ 0.7     â†’ confirm      â”‚
+                          â”‚  score > 0.7   â†’ full_review  â”‚
+                          â””â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”˜
+                              â”‚           â”‚           â”‚
+                  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–¼â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â–¼â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â–¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                  â”‚ execute now  â”‚ â”‚ confirmationâ”‚ â”‚ human review   â”‚
+                  â”‚ auto_executedâ”‚ â”‚ queue       â”‚ â”‚ queue          â”‚
+                  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”˜ â””â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”˜ â””â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                              â”‚           â”‚           â”‚
+                          â”Œâ”€â”€â”€â–¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–¼â”€â”€â”€â”
+                          â”‚  audit_store (DynamoDB)       â”‚
+                          â”‚  <prefix>-audit-log           â”‚
+                          â”‚  PK session_id / SK timestamp â”‚
+                          â”‚  full risk breakdown per row  â”‚
+                          â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                                          â”‚
                                   GET /audit/{session_id}
                                   "show the receipts"
 ```
@@ -102,7 +102,7 @@ Run the API locally:
 
 ```bash
 uvicorn autonomy_engine.main:app --reload
-# → http://127.0.0.1:8000/docs
+# â†’ http://127.0.0.1:8000/docs
 ```
 
 ---
@@ -111,14 +111,14 @@ uvicorn autonomy_engine.main:app --reload
 
 | Dimension | Weight | Scoring |
 |---|---|---|
-| `reversibility` | 35% | reversible `0.1` · partially_reversible `0.5` · irreversible `0.9` |
-| `data_scope` | 25% | 1 record `0.1` · 2–10 `0.3` · 11–100 `0.6` · 100+ `0.9` |
-| `regulatory_category` | 25% | none `0.1` · internal_sensitive `0.5` · regulated `0.9` |
-| `confidence` | 15% | `1 - confidence` — low model confidence means high risk |
+| `reversibility` | 35% | reversible `0.1` Â· partially_reversible `0.5` Â· irreversible `0.9` |
+| `data_scope` | 25% | 1 record `0.1` Â· 2â€“10 `0.3` Â· 11â€“100 `0.6` Â· 100+ `0.9` |
+| `regulatory_category` | 25% | none `0.1` Â· internal_sensitive `0.5` Â· regulated `0.9` |
+| `confidence` | 15% | `1 - confidence` â€” low model confidence means high risk |
 
 Weights are named constants at the top of `risk_scorer.py` and routing
 thresholds (`low=0.3`, `high=0.7`) are configurable per call.
 
 ---
 
-Status: Phase 2 complete
+Status: Phase 3 complete
