@@ -192,48 +192,76 @@ _DEFAULT_DATA_PATH: Final[Path] = (
     Path(__file__).resolve().parents[2] / "data" / "customer_shopping_data.csv"
 )
 
+# When running on Lambda the CSV lives in S3.
+# Set CUSTOMER_DATA_S3_URI=s3://bucket/key.csv to enable.
+_S3_URI: str | None = os.getenv("CUSTOMER_DATA_S3_URI") or None
+
+
+def _s3_bucket_key() -> tuple[str, str] | None:
+    """Parse CUSTOMER_DATA_S3_URI into (bucket, key). Returns None if not set."""
+    if not _S3_URI:
+        return None
+    # s3://bucket/path/to/file.csv
+    without_scheme = _S3_URI.removeprefix("s3://")
+    bucket, _, key = without_scheme.partition("/")
+    return bucket, key
+
 
 def data_path() -> Path:
-    """Location of the transaction CSV. Override with ``CUSTOMER_DATA_PATH``."""
+    """Location of the transaction CSV for local use. Override with CUSTOMER_DATA_PATH."""
     override = os.getenv("CUSTOMER_DATA_PATH")
     return Path(override) if override else _DEFAULT_DATA_PATH
 
 
 def snapshot_dir() -> Path:
-    """Directory holding pre-write snapshots. Override with ``CUSTOMER_SNAPSHOT_DIR``."""
+    """Directory holding pre-write snapshots. Override with CUSTOMER_SNAPSHOT_DIR."""
     override = os.getenv("CUSTOMER_SNAPSHOT_DIR")
-    return Path(override) if override else data_path().parent / "snapshots"
+    return Path(override) if override else Path("/tmp/snapshots")
 
 
 # --------------------------------------------------------------------------
-# File I/O
+# File I/O  (local + S3)
 # --------------------------------------------------------------------------
+
+_S3_LOCAL_CACHE: Path = Path("/tmp/customer_shopping_data.csv")
 
 
 def load_rows() -> list[dict[str, str]]:
-    """Read every transaction row.
-
-    Raises:
-        DataStoreError: If the CSV is missing. That is a deployment problem, not
-            an empty result set, so it is not quietly turned into ``[]``.
-    """
+    """Read every transaction row — from S3 on Lambda, from disk locally."""
+    s3_loc = _s3_bucket_key()
+    if s3_loc:
+        return _load_rows_s3(*s3_loc)
     path = data_path()
     if not path.exists():
         raise DataStoreError(
-            f"transaction data file not found at {path}. Set CUSTOMER_DATA_PATH or "
-            "restore data/customer_shopping_data.csv."
+            f"transaction data file not found at {path}. "
+            "Set CUSTOMER_DATA_PATH or CUSTOMER_DATA_S3_URI."
         )
     with path.open(newline="", encoding="utf-8") as handle:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
-def _write_rows(rows: list[dict[str, str]]) -> None:
-    """Overwrite the CSV atomically.
+def _load_rows_s3(bucket: str, key: str) -> list[dict[str, str]]:
+    """Download from S3 to /tmp cache, then read. Re-downloads if missing."""
+    import io
+    import boto3 as _boto3
+    if not _S3_LOCAL_CACHE.exists():
+        s3 = _boto3.client("s3")
+        buf = io.BytesIO()
+        s3.download_fileobj(bucket, key, buf)
+        buf.seek(0)
+        _S3_LOCAL_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        _S3_LOCAL_CACHE.write_bytes(buf.read())
+    with _S3_LOCAL_CACHE.open(newline="", encoding="utf-8") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
 
-    The temp file is created alongside the target so :func:`os.replace` stays on
-    one filesystem and is therefore atomic; a crash mid-write leaves the
-    original file untouched rather than a truncated 99k-row CSV.
-    """
+
+def _write_rows(rows: list[dict[str, str]]) -> None:
+    """Overwrite the CSV atomically — writes to /tmp then syncs to S3 on Lambda."""
+    s3_loc = _s3_bucket_key()
+    if s3_loc:
+        _write_rows_s3(rows, *s3_loc)
+        return
     path = data_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(".csv.tmp")
@@ -242,6 +270,21 @@ def _write_rows(rows: list[dict[str, str]]) -> None:
         writer.writeheader()
         writer.writerows(rows)
     os.replace(temp_path, path)
+
+
+def _write_rows_s3(rows: list[dict[str, str]], bucket: str, key: str) -> None:
+    """Write rows back to S3 and update the local /tmp cache."""
+    import io
+    import boto3 as _boto3
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=list(FIELDS))
+    writer.writeheader()
+    writer.writerows(rows)
+    body = buf.getvalue().encode("utf-8")
+    _boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=body)
+    # Invalidate local cache so next load_rows re-reads fresh data
+    if _S3_LOCAL_CACHE.exists():
+        _S3_LOCAL_CACHE.unlink()
 
 
 # --------------------------------------------------------------------------

@@ -1,0 +1,38 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Frontend
+frontend/
+
+# Data files — too large for Lambda, will use S3 or EFS in production
+data/
+
+# Dev/test artifacts
+.aws-sam/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+
+# Docs and scripts
+docs/
+scripts/
+infra/
+
+# Snapshots
+data/snapshots/
+
+# Misc
+*.csv
+*.log
+*.tmp
+.env
+.env.example
+README.md
+samconfig.toml
+requirements-lambda.txt
+pyproject.toml
