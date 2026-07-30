@@ -25,12 +25,26 @@ No web framework here; that lives in :mod:`main`.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Final
 
-from autonomy_engine import audit_store, executor
+from autonomy_engine import audit_store, calibration, executor
 from autonomy_engine.agent_actions import AgentAction
 from autonomy_engine.executor import ExecutionResult
 from autonomy_engine.risk_scorer import RiskAssessment
+
+logger = logging.getLogger(__name__)
+
+#: Statuses that count as a positive calibration signal (human agreed to run
+#: this action as proposed) versus negative (human refused it). Kept as an
+#: explicit map rather than "confirmed/reviewed vs everything else" so a new
+#: status added later cannot silently start feeding calibration.
+_POSITIVE_SIGNAL_STATUSES: Final[frozenset[str]] = frozenset(
+    {audit_store.STATUS_CONFIRMED, audit_store.STATUS_REVIEWED}
+)
+_NEGATIVE_SIGNAL_STATUSES: Final[frozenset[str]] = frozenset(
+    {audit_store.STATUS_REJECTED}
+)
 
 #: Decisions each queue accepts, mapped to the status they write.
 CONFIRMATION_DECISIONS: Final[dict[str, str]] = {
@@ -273,6 +287,8 @@ def _resolve_and_maybe_execute(
         expected_routing=expected_routing,
     )
 
+    _record_calibration_signal(record, new_status)
+
     if new_status not in EXECUTING_STATUSES:
         return audit_store.record_execution(
             record_id,
@@ -312,3 +328,30 @@ def _validate_decision(decision: str, allowed: dict[str, str], queue: str) -> st
             f"expected one of {sorted(allowed)}"
         )
     return allowed[decision]
+
+
+def _record_calibration_signal(record: dict[str, Any], new_status: str) -> None:
+    """Feed one human decision into the adaptive calibration table.
+
+    Records nothing if the record has no ``action_type`` (a hand-written or
+    pre-vocabulary record) or if the calibration write itself fails -- learning
+    from history is a nice-to-have, and a broken calibration file must never
+    take down a live human review.
+    """
+    action_type = record.get("action_type")
+    if not action_type:
+        return
+
+    if new_status in _POSITIVE_SIGNAL_STATUSES:
+        positive = True
+    elif new_status in _NEGATIVE_SIGNAL_STATUSES:
+        positive = False
+    else:
+        return
+
+    try:
+        calibration.record_signal(str(action_type), positive=positive)
+    except Exception:  # noqa: BLE001 - calibration is best-effort
+        logger.warning(
+            "failed to record calibration signal for %s", action_type, exc_info=True
+        )

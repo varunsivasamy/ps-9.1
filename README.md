@@ -93,6 +93,7 @@ HTTP API, with a PAY_PER_REQUEST DynamoDB table for the audit log. See
 src/autonomy_engine/
   risk_scorer.py     # band -> autonomy level routing, zero AWS dependency
   agent_actions.py   # Anthropic call; agent proposes an action + judges its risk
+  calibration.py     # adaptive learning: nudges routing from human history
   data_store.py      # the transaction CSV: filters, writes, snapshots, rollback
   executor.py        # runs an already-authorised action against the store
   audit_store.py     # DynamoDB persistence for the audit log
@@ -379,6 +380,48 @@ gigabyte of I/O proving things that hold just as well on 300 rows.
 
 ---
 
+## Adaptive calibration
+
+Every human decision on a queued action is a signal. If the same `action_type`
+gets confirmed by reviewers over and over without modification, the engine
+learns to route it more permissively; if it keeps getting rejected, the engine
+learns to route it more strictly.
+
+The counters live in a JSON file (`data/action_type_calibration.json` by
+default, `CALIBRATION_PATH` to override — point it at `/tmp/…` on Lambda):
+
+```json
+{
+  "single_record_write": {
+    "confirms_without_modification": 12,
+    "rejects_or_modifications": 1,
+    "band_offset": -1.0
+  }
+}
+```
+
+- Net signal below `MIN_SIGNALS_FOR_SHIFT` (10) → no change. A lucky handful
+  cannot flip routing on a novel action type.
+- Net ≥ 10 confirms → routing shifts one step toward autonomous.
+- Net ≥ 10 rejects → routing shifts one step toward full_review.
+- The shift is capped to one level per call — an action_type with 100 net
+  confirms moves the same distance as one with 10.
+
+Two invariants make this safe to leave running:
+
+- **Calibration runs before the blast-radius floor.** A bulk delete calibrated
+  down to `autonomous` still gets re-escalated to `full_review` by the floor,
+  because scope is a fact and does not care about history. Safety cannot be
+  trained away.
+- **Every shift is recorded in the audit breakdown** with the exact counts
+  that produced it, so a reviewer sees the shift came from history rather than
+  from the model changing its mind.
+
+Inspect the live table via `GET /calibration`.
+
+---
+
 Status: Phase 4 complete, plus LLM-judged risk banding, preflight scope
-grounding with re-judgement, an escalate-only blast-radius floor, and a live
-execution layer over the 99k-row transaction dataset.
+grounding with re-judgement, an escalate-only blast-radius floor, a live
+execution layer over the 99k-row transaction dataset, and adaptive calibration
+learning from human confirm/reject signals.

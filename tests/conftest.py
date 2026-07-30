@@ -51,6 +51,19 @@ def isolated_transaction_data(tmp_path, monkeypatch):
     yield working_csv
 
 
+@pytest.fixture(autouse=True)
+def isolated_calibration(tmp_path, monkeypatch):
+    """Give every test a private calibration file.
+
+    Autouse for the same reason: any test that resolves a confirmation or
+    review through the real API path feeds a signal into the calibration
+    table. Without isolation, those signals would land in
+    ``data/action_type_calibration.json`` and leak across runs.
+    """
+    monkeypatch.setenv("CALIBRATION_PATH", str(tmp_path / "calibration.json"))
+    yield
+
+
 @pytest.fixture
 def aws_env(monkeypatch):
     """Point boto3 at moto with dummy credentials.

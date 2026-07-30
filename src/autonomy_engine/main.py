@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from autonomy_engine import audit_store, confirmation, executor, risk_scorer
+from autonomy_engine import audit_store, calibration, confirmation, executor, risk_scorer
 from autonomy_engine.agent_actions import (
     AgentActionError,
     propose_action,
@@ -227,6 +227,22 @@ async def propose(body: ProposeRequest, request: Request) -> dict:
     )
     decision = route_action(assessment)
 
+    # Adaptive calibration — nudges based on human history for this action_type.
+    # Runs *before* the floor so any calibration-driven relaxation still has to
+    # clear the safety floor. A shift to autonomous on a bulk delete gets
+    # re-escalated to full_review below; calibration cannot train safety away.
+    decision, calibration_note = calibration.apply_calibration(decision, action.action_type)
+    if calibration_note:
+        logger.info(
+            "calibration shifted routing",
+            extra={
+                "session_id": body.session_id,
+                "action_type": action.action_type,
+                "new_decision": decision,
+            },
+        )
+        assessment = assessment.with_calibration(calibration_note)
+
     # Blast-radius floor — can only escalate, never lower supervision.
     decision, floor_note = risk_scorer.apply_blast_radius_floor(
         decision,
@@ -316,6 +332,17 @@ async def audit_trail(session_id: str, request: Request) -> dict:
     }
 
 
+@app.get("/calibration")
+async def calibration_snapshot() -> dict:
+    """The current adaptive-calibration table, keyed by action_type.
+
+    Read-only. Useful for the demo: after a run of confirms on a given
+    action_type, the caller can see the counters move and, once past the
+    threshold, the ``band_offset`` flip to -1.0.
+    """
+    return {"calibration": calibration.snapshot()}
+
+
 @app.get("/health")
 async def health() -> dict:
     """Liveness probe: reports whether DynamoDB is reachable."""
@@ -337,6 +364,7 @@ def _score_payload(assessment: RiskAssessment) -> dict:
         # Surfaced, not hidden: if the engine overrode the agent, the caller and
         # the reviewer both need to know that is what happened.
         "escalated_by_floor": assessment.escalated_by_floor,
+        "calibrated": assessment.calibrated,
         "actual_rows": assessment.actual_rows,
         "breakdown": assessment.breakdown,
     }

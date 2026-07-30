@@ -175,6 +175,10 @@ class RiskAssessment(BaseModel):
         default=False,
         description="True if the blast-radius floor raised this above the model's band.",
     )
+    calibrated: bool = Field(
+        default=False,
+        description="True if adaptive calibration shifted this above or below the model's band.",
+    )
     actual_rows: int | None = Field(
         default=None,
         description="True affected-row count, measured from the data before routing.",
@@ -188,6 +192,18 @@ class RiskAssessment(BaseModel):
         override anything to get the decision in front of them.
         """
         return self.model_copy(update={"actual_rows": actual_rows})
+
+    def with_calibration(self, note: str) -> RiskAssessment:
+        """Record that adaptive calibration shifted this action's routing.
+
+        Kept beside the model's original band rather than replacing it: an
+        auditor comparing two runs of the same request should be able to see
+        that the shift came from *history* rather than from the model changing
+        its mind.
+        """
+        breakdown = dict(self.breakdown)
+        breakdown["calibration"] = note
+        return self.model_copy(update={"breakdown": breakdown, "calibrated": True})
 
     def with_override(self, note: str) -> RiskAssessment:
         """Record that the blast-radius floor escalated this action.

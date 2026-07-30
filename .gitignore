@@ -62,6 +62,9 @@ frontend/*.local
 data/snapshots/
 data/*.csv.tmp
 
+# Adaptive-calibration counters — machine-learned local state, not seed data.
+data/action_type_calibration.json
+
 # ---- Editors / OS ----
 .vscode/
 .idea/
