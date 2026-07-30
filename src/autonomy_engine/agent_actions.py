@@ -15,6 +15,7 @@ against them.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -57,6 +58,14 @@ MAX_TOKENS: Final[int] = 8192
 #: (see ``_client``) and retries are handled here instead.
 MAX_ATTEMPTS: Final[int] = 2
 RETRY_DELAY_SECONDS: Final[float] = 1.0
+
+#: Which LLM backend propose_action() calls. "anthropic" (default) is the
+#: deployed system. "groq" is a local-demo-only stand-in for when the
+#: Anthropic account has no credits -- see propose_action() below.
+LLM_PROVIDER: Final[str] = os.getenv("AGENT_LLM_PROVIDER", "anthropic").lower()
+
+#: Model used on the Groq path. Only consulted when LLM_PROVIDER == "groq".
+GROQ_MODEL: Final[str] = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 SYSTEM_PROMPT: Final[str] = """\
 You are an AI agent operating inside a graduated autonomy engine. You have access \
@@ -296,6 +305,14 @@ def propose_action(user_request: str, tool_context: dict[str, Any]) -> AgentActi
         context_lines = "\n".join(f"- {k}: {v}" for k, v in situational.items())
         prompt = f"Context for this request:\n{context_lines}\n\nRequest: {user_request}"
 
+    if LLM_PROVIDER == "groq":
+        # Local-demo-only path: the deployed system runs on Anthropic (see
+        # _call_with_one_retry below). This exists purely so the API can be
+        # exercised end-to-end on localhost when the Anthropic account has no
+        # credits -- gated behind an explicit env var, never the default.
+        tool_name, payload = _call_groq_with_one_retry(prompt, tools)
+        return _build_action(tool_name, payload)
+
     response = _call_with_one_retry(prompt, tools)
     return _parse_response(response)
 
@@ -366,19 +383,29 @@ def _parse_response(response: Any) -> AgentAction:
 
     # `strict: True` guarantees the shape, but this layer also runs against
     # mocked responses in tests, so validate rather than assume.
-    payload = dict(tool_use.input)
+    return _build_action(tool_use.name, dict(tool_use.input))
+
+
+def _build_action(tool_name: str, payload: dict[str, Any]) -> AgentAction:
+    """Turn a {tool_name, payload} pair -- from any provider -- into an AgentAction.
+
+    Shared by the Anthropic and Groq paths so the validation rules (self
+    assessment present, fields well-formed) apply identically regardless of
+    which model produced the tool call.
+    """
+    payload = dict(payload)
     assessment = payload.pop("self_assessment", None)
     if not isinstance(assessment, dict):
         raise AgentActionError(
-            f"Tool call {tool_use.name!r} is missing its self_assessment block; "
+            f"Tool call {tool_name!r} is missing its self_assessment block; "
             "the action cannot be risk-scored."
         )
 
     try:
         return AgentAction(
-            action_type=TOOL_ACTION_TYPES.get(tool_use.name, tool_use.name),
-            description=_describe(tool_use.name, payload),
-            tool_name=tool_use.name,
+            action_type=TOOL_ACTION_TYPES.get(tool_name, tool_name),
+            description=_describe(tool_name, payload),
+            tool_name=tool_name,
             parameters=payload,
             reversibility=assessment["reversibility"],
             data_scope=assessment["data_scope"],
@@ -387,9 +414,102 @@ def _parse_response(response: Any) -> AgentAction:
         )
     except (KeyError, ValueError) as exc:
         raise AgentActionError(
-            f"Tool call {tool_use.name!r} returned an unusable self_assessment "
+            f"Tool call {tool_name!r} returned an unusable self_assessment "
             f"({assessment!r}): {exc}"
         ) from exc
+
+
+# --------------------------------------------------------------------------
+# Groq path (local-demo-only stand-in for Anthropic; see LLM_PROVIDER above)
+# --------------------------------------------------------------------------
+
+
+def _to_openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Translate our Anthropic-shaped tool schemas into OpenAI function-calling
+    format. Groq's chat completions API is OpenAI-compatible.
+
+    Built from the same TOOL_SCHEMAS the Anthropic path uses, so the two
+    providers can never drift out of sync with each other.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"],
+            },
+        }
+        for tool in tools
+    ]
+
+
+def _call_groq_with_one_retry(
+    prompt: str, tools: list[dict[str, Any]]
+) -> tuple[str, dict[str, Any]]:
+    """Groq equivalent of _call_with_one_retry: same retry policy, same shape
+    of failure, different wire format. Returns (tool_name, arguments).
+    """
+    import groq  # local import: not a hard dependency of the deployed system
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise AgentActionError(
+            "AGENT_LLM_PROVIDER=groq but GROQ_API_KEY is not set in the environment."
+        )
+    client = groq.Groq(api_key=api_key, max_retries=0)
+
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                tools=_to_openai_tools(tools),
+                tool_choice="required",
+            )
+            break
+        except (groq.APIConnectionError, groq.RateLimitError, groq.InternalServerError) as exc:
+            last_error = exc
+            if attempt < MAX_ATTEMPTS:
+                logger.warning(
+                    "propose_action (groq) attempt %d/%d failed (%s); retrying in %.1fs",
+                    attempt,
+                    MAX_ATTEMPTS,
+                    type(exc).__name__,
+                    RETRY_DELAY_SECONDS,
+                )
+                time.sleep(RETRY_DELAY_SECONDS)
+        except groq.APIStatusError as exc:
+            raise AgentActionError(
+                f"Groq API rejected the request ({exc.status_code}): {exc.message}"
+            ) from exc
+    else:
+        raise AgentActionError(
+            f"Groq API unreachable after {MAX_ATTEMPTS} attempts: "
+            f"{type(last_error).__name__}: {last_error}"
+        ) from last_error
+
+    message = response.choices[0].message
+    if not message.tool_calls:
+        raise AgentActionError(
+            "The model returned no tool call, so there is no action to score. "
+            f"finish_reason={response.choices[0].finish_reason!r}, "
+            f"text={(message.content or '')[:200]!r}"
+        )
+
+    call = message.tool_calls[0]
+    try:
+        arguments = json.loads(call.function.arguments)
+    except json.JSONDecodeError as exc:
+        raise AgentActionError(
+            f"Tool call {call.function.name!r} returned unparseable JSON arguments: {exc}"
+        ) from exc
+    return call.function.name, arguments
 
 
 def _describe(tool_name: str, parameters: dict[str, Any]) -> str:
