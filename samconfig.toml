@@ -1,0 +1,10 @@
+[default.deploy.parameters]
+stack_name        = "autonomy-engine"
+resolve_s3        = true
+region            = "ap-south-1"
+confirm_changeset = false
+capabilities      = "CAPABILITY_IAM"
+parameter_overrides = [
+  "TablePrefix=ps-9-1-autonomy-engine",
+  "CorsAllowedOrigin=https://agent-rish-console.vercel.app"
+]
