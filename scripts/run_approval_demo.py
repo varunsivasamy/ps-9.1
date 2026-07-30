@@ -1,19 +1,19 @@
 """
-Interactive human-approval demo
-================================
+Interactive human-approval demo  (multi-turn agentic loop)
+===========================================================
 Run:  python scripts/run_approval_demo.py
 
-What it does:
-1. Spins up a moto (in-process) mock of DynamoDB — no real AWS, no local server needed.
-2. Sends a medium-risk query to the LLM (Groq by default; switch to Anthropic by
-   unsetting AGENT_LLM_PROVIDER in your environment).
-3. The agent scores the action and routes it.
-   - If routed to "confirm"  -> pauses and asks YOU to approve/reject.
-   - If routed to "autonomous" -> executes immediately (low risk).
-   - If routed to "full_review" -> prints what a reviewer would see.
+What it does
+------------
+1. Spins up a moto (in-process) mock of DynamoDB.
+2. Sends a high-risk query to Groq.
+3. The agent runs a three-phase loop:
+     Phase 1 — calls count_matching_rows → gets real row count from CSV
+     Phase 2 — calls submit_risk_assessment → engine scores and routes
+     Phase 3 — if autonomous: executes immediately
+               if confirm:    pauses here, asks YOU to approve/reject
+               if full_review: pauses here, asks YOU to approve/reject
 4. Prints the final audit record.
-
-Set AGENT_LLM_PROVIDER=groq (or anthropic) in your shell before running.
 """
 
 from __future__ import annotations
@@ -22,17 +22,15 @@ import os
 import sys
 from pathlib import Path
 
-# ── make sure the src package is importable ──────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-# ── load .env before touching any autonomy_engine module ─────────────────────
 from dotenv import load_dotenv
 load_dotenv()
 
-# Force Groq as the LLM provider — no Anthropic calls
+# Force Groq — no Anthropic
 os.environ["AGENT_LLM_PROVIDER"] = "groq"
 
-# ── moto must be activated BEFORE boto3/audit_store is imported ──────────────
+# Moto must start before boto3/audit_store are imported
 import moto
 mock = moto.mock_aws()
 mock.start()
@@ -40,7 +38,6 @@ mock.start()
 import boto3
 from autonomy_engine import audit_store
 
-# Create the in-memory DynamoDB table
 def _create_table() -> None:
     prefix = os.getenv("DYNAMODB_TABLE_PREFIX", "ps-9-1-autonomy-engine-local")
     name = f"{prefix}-audit-log"
@@ -58,128 +55,130 @@ def _create_table() -> None:
         BillingMode="PAY_PER_REQUEST",
     ).wait_until_exists()
 
-# Override endpoint so audit_store uses the moto mock, not localhost:5000
 os.environ["DYNAMODB_ENDPOINT_URL"] = ""
 audit_store.reset_cache()
 _create_table()
 audit_store.reset_cache()
 
-# ── now import the rest of the engine ─────────────────────────────────────────
 from autonomy_engine import confirmation
-from autonomy_engine.agent_actions import propose_action
-from autonomy_engine import data_store
-from autonomy_engine.risk_scorer import build_assessment, route_action, describe_routing
+from autonomy_engine.agent_actions import run_agent_loop
 
-DIVIDER = "─" * 60
+DIVIDER = "─" * 64
+
 
 def main() -> None:
-    # A high-risk request: bulk irreversible delete on regulated data
+    # ── choose your query here ────────────────────────────────────────────
     user_request = (
-        "Permanently delete every Clothing transaction from the database "
-        "to comply with our data retention policy. This cannot be undone."
+        "Permanently delete all Clothing transactions from Kanyon mall. "
+        "This is for a data retention audit and cannot be undone."
     )
     session_id = "demo-session-001"
 
     print(DIVIDER)
-    print("PS-9.1  Graduated Autonomy Engine  –  Interactive Demo")
+    print("PS-9.1  Graduated Autonomy Engine  —  Interactive Demo")
     print(DIVIDER)
     print(f"\nUser request : {user_request}")
-    print(f"Session      : {session_id}")
-    print(f"Transactions : {data_store.data_path()} ({len(data_store.load_rows()):,} rows)")
-    print(f"LLM provider : {os.getenv('AGENT_LLM_PROVIDER', 'anthropic')}\n")
+    print(f"Session      : {session_id}\n")
 
-    # ── Step 1: agent proposes an action ─────────────────────────────────────
-    print("⏳  Asking the agent to propose an action …")
-    action = propose_action(user_request, {})
-    print(f"\n✅  Agent chose tool   : {action.tool_name}")
+    print("⏳  Agent is measuring risk (calling real tools) …\n")
+    result = run_agent_loop(user_request)
+    action = result.action
+
+    print(f"✅  Agent chose tool   : {action.tool_name}")
     print(f"    Description        : {action.description}")
     print(f"    Reversibility      : {action.reversibility}")
-    print(f"    Data scope         : {action.data_scope} record(s)")
+    print(f"    Data scope (real)  : {action.data_scope} row(s) counted from CSV")
     print(f"    Regulatory         : {action.regulatory_category}")
     print(f"    Model confidence   : {action.confidence:.2f}")
-    print(f"    Filter to execute  : {action.parameters.get('filter')}")
+    print(f"\n📊  Composite score : {result.composite_score:.4f}")
+    print(f"    Routing         : {result.routing.upper()}\n")
+    for dim, note in result.score_breakdown.items():
+        print(f"    {dim:<22s} {note}")
 
-    # ── Step 2: the agent's own risk judgement, and where it routes ──────────
-    assessment = build_assessment(action.to_risk_factors())
-    decision   = route_action(assessment)
-
-    print(f"\n📊  Agent judged risk : {assessment.risk_band.upper()} ({assessment.composite_score:.2f})")
-    print(f"    Routing           : {decision.upper()}")
-    print(f"    Reason            : {describe_routing(assessment, decision)}")
-    print()
-    for dim, note in assessment.breakdown.items():
-        print(f"    {dim:<20s} {note}")
-
-    # ── Step 3: handle routing decision ──────────────────────────────────────
     print(f"\n{DIVIDER}")
 
-    if decision == "autonomous":
-        record, result = confirmation.execute_autonomously(
-            action, assessment, session_id=session_id
+    # ── route ─────────────────────────────────────────────────────────────
+    if result.routing == "autonomous":
+        record = confirmation.record_autonomous_execution(
+            action, _fake_score(result), session_id=session_id
         )
-        print("🤖  LOW RISK — executed automatically (no human needed).")
-        print(f"    Result          : {result.detail}")
-        if result.scope_check:
-            print(f"    Scope check     : {result.scope_check}")
+        print("🤖  LOW RISK — executed automatically.")
+        if result.execution_result:
+            print(f"    Result: {result.execution_result}")
         print(f"    Audit record id : {record['record_id']}")
 
-    elif decision == "confirm":
-        # Queue the action and ask the human
+    elif result.routing == "confirm":
         confirmation_id = confirmation.create_confirmation_request(
-            action, assessment, session_id=session_id
+            action, _fake_score(result), session_id=session_id
         )
         print("🟡  MEDIUM RISK — human approval required.\n")
         print(f"    Preview         : {action.description}")
+        print(f"    Rows affected   : {action.data_scope}")
         print(f"    Confirmation ID : {confirmation_id}\n")
 
-        while True:
-            choice = input("    ➤  Your decision [confirm / reject]: ").strip().lower()
-            if choice in ("confirm", "reject"):
-                break
-            print("    Please type 'confirm' or 'reject'.")
-
+        choice = _prompt("confirm", "reject")
         reviewer = input("    ➤  Your name (reviewer): ").strip() or "demo-user"
-        record   = confirmation.resolve_confirmation(confirmation_id, choice, reviewer)
-
-        status_icon = "✅" if choice == "confirm" else "❌"
-        print(f"\n{status_icon}  Decision recorded: {record['status'].upper()} by {record['reviewer']}")
+        record = confirmation.resolve_confirmation(confirmation_id, choice, reviewer)
+        _print_decision(choice, record)
 
     else:  # full_review
         review_id = confirmation.create_review_request(
-            action, assessment, session_id=session_id
+            action, _fake_score(result), session_id=session_id
         )
         print("🔴  HIGH RISK — blocked, pending full human review.\n")
-        print(f"    Preview   : {action.description}")
-        print(f"    Review ID : {review_id}\n")
+        print(f"    Preview       : {action.description}")
+        print(f"    Rows affected : {action.data_scope}")
+        print(f"    Review ID     : {review_id}\n")
 
-        while True:
-            choice = input("    ➤  Your decision [approve / reject]: ").strip().lower()
-            if choice in ("approve", "reject"):
-                break
-            print("    Please type 'approve' or 'reject'.")
-
+        choice = _prompt("approve", "reject")
         reviewer = input("    ➤  Your name (reviewer): ").strip() or "demo-user"
-        record   = confirmation.resolve_review(review_id, choice, reviewer)
+        record = confirmation.resolve_review(review_id, choice, reviewer)
+        _print_decision(choice, record)
 
-        status_icon = "✅" if choice == "approve" else "❌"
-        print(f"\n{status_icon}  Decision recorded: {record['status'].upper()} by {record['reviewer']}")
-
-    # ── Step 4: print the full audit trail ───────────────────────────────────
+    # ── audit trail ───────────────────────────────────────────────────────
     print(f"\n{DIVIDER}")
-    print("📋  Audit trail for this session:\n")
-    trail = audit_store.get_audit_trail(session_id)
-    for entry in trail:
+    print("📋  Audit trail:\n")
+    for entry in audit_store.get_audit_trail(session_id):
         print(f"  record_id   : {entry['record_id']}")
         print(f"  action_type : {entry.get('action_type')}")
         print(f"  routing     : {entry.get('routing_decision')}")
         print(f"  status      : {entry.get('status')}")
         print(f"  reviewer    : {entry.get('reviewer')}")
         print(f"  score       : {entry.get('composite_score')}")
-        print(f"  execution   : {entry.get('execution_status')} — {entry.get('execution_detail')}")
         print()
 
     print(DIVIDER)
     mock.stop()
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+def _prompt(opt_a: str, opt_b: str) -> str:
+    while True:
+        choice = input(f"    ➤  Your decision [{opt_a} / {opt_b}]: ").strip().lower()
+        if choice in (opt_a, opt_b):
+            return choice
+        print(f"    Please type '{opt_a}' or '{opt_b}'.")
+
+
+def _print_decision(choice: str, record: dict) -> None:
+    icon = "✅" if choice in ("confirm", "approve") else "❌"
+    print(f"\n{icon}  Decision recorded: {record['status'].upper()} by {record['reviewer']}")
+
+
+def _fake_score(result) -> object:
+    """Shim: confirmation functions want a RiskScore object."""
+    from autonomy_engine.risk_scorer import RiskScore
+    return RiskScore(
+        reversibility_score=0.0,
+        data_scope_score=0.0,
+        regulatory_score=0.0,
+        confidence_score=0.0,
+        composite_score=result.composite_score,
+        breakdown=result.score_breakdown,
+    )
 
 
 if __name__ == "__main__":

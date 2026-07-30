@@ -6,9 +6,9 @@ interface RequestFormProps {
 }
 
 const EXAMPLES = [
-  "Look up the order history for customer C-4471.",
-  "Update the email address on file for customer C-1029 to a.new@example.com.",
-  "Delete all customer records that have had no activity since 2019.",
+  "How much total revenue did Clothing transactions generate?",
+  "Update the payment method on invoice I138884 to Credit Card.",
+  "Delete all Clothing transactions from Kanyon mall.",
 ];
 
 export function RequestForm({ onSubmit, disabled }: RequestFormProps) {
@@ -46,8 +46,12 @@ export function RequestForm({ onSubmit, disabled }: RequestFormProps) {
             </button>
           ))}
         </div>
-        <button type="submit" className="button button--primary" disabled={disabled || !value.trim()}>
-          {disabled ? "Sending…" : "Send to agent"}
+        <button
+          type="submit"
+          className="button button--primary"
+          disabled={disabled || !value.trim()}
+        >
+          {disabled ? "Thinking…" : "Send to agent"}
         </button>
       </div>
     </form>

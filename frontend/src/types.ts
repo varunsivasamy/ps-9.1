@@ -1,32 +1,25 @@
-// Mirrors the response/request shapes defined in
-// src/autonomy_engine/main.py, risk_scorer.py, and audit_store.py.
+// Mirrors the response/request shapes defined in main.py and risk_scorer.py.
 
 export type RoutingDecision = "autonomous" | "confirm" | "full_review";
-
 export type RiskBand = "low" | "medium" | "high";
+export type ExecutionStatus = "success" | "failed" | "skipped";
 
 export interface RiskScorePayload {
-  /** The agent's own judgement. This is what routed the action. */
   risk_band: RiskBand;
-  /** Numeric severity consistent with the band. Presentational only. */
   composite_score: number;
-  /** One sentence on why the four dimensions add up to this band. */
   rationale: string;
-  /** True if the model's severity contradicted its band and was overridden. */
   severity_was_clamped: boolean;
+  escalated_by_floor?: boolean;
+  actual_rows?: number;
   breakdown: Record<string, string>;
 }
 
-export type ExecutionStatus = "success" | "failed" | "skipped";
-
-/** What actually happened when the action ran against the customer store. */
 export interface ExecutionResult {
   status: ExecutionStatus;
   detail: string;
   affected_count: number;
   rows: Record<string, string>[];
   truncated: boolean;
-  /** Aggregate totals, present only for summarize_transactions. */
   summary?: {
     transactions: number;
     total_quantity: number;
@@ -67,13 +60,10 @@ export type ConfirmationDecision = "confirm" | "reject";
 export type ReviewDecision = "approve" | "reject";
 
 export interface ResolveResponse {
-  /** Authorisation outcome: was this approved? */
   status: string;
   reviewer: string;
-  /** Whether it then actually ran. Null on records with nothing to execute. */
   execution_status: ExecutionStatus | null;
   execution_detail: string | null;
-  /** Path to the pre-write snapshot, for rolling the change back. */
   snapshot_path: string | null;
 }
 
@@ -102,14 +92,11 @@ export interface HealthResponse {
 }
 
 export interface ApiErrorPayload {
-  error: {
-    message: string;
-  };
+  error: { message: string };
 }
 
 export class ApiError extends Error {
   status: number;
-
   constructor(status: number, message: string) {
     super(message);
     this.name = "ApiError";
