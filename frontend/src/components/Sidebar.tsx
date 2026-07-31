@@ -13,6 +13,9 @@ interface SidebarProps {
   onToggle: () => void;
   activePage: string;
   onNavigate: (page: string) => void;
+  /** Mobile only — below `md` the sidebar is an off-canvas drawer. */
+  mobileOpen: boolean;
+  onMobileClose: () => void;
 }
 
 const NAV = [
@@ -27,13 +30,26 @@ const STATUS = [
   { label: "LLM API",  ok: true  },
 ];
 
-export function Sidebar({ collapsed, onToggle: _onToggle, activePage, onNavigate }: SidebarProps) {
+export function Sidebar({
+  collapsed,
+  onToggle: _onToggle,
+  activePage,
+  onNavigate,
+  mobileOpen,
+  onMobileClose,
+}: SidebarProps) {
   return (
-    <motion.aside
-      animate={{ width: collapsed ? 64 : 220 }}
-      transition={{ duration: 0.22, ease: [0.22, 0.61, 0.36, 1] }}
-      className="flex flex-col bg-sidebar-bg text-white shrink-0 overflow-hidden
-                 border-r border-sidebar-border relative select-none h-screen sticky top-0"
+    // Width is a class rather than a framer-motion `animate`, because the
+    // mobile drawer slides on `transform` and motion owning the inline style
+    // fights the translate. `collapsed` never changes since the toggle was
+    // removed, so nothing is lost by dropping the width animation.
+    <aside
+      className={`flex flex-col bg-sidebar-bg text-white shrink-0 overflow-hidden
+                  border-r border-sidebar-border select-none h-[100dvh]
+                  fixed inset-y-0 left-0 z-50 transition-transform duration-200 ease-out
+                  md:sticky md:inset-auto md:top-0 md:z-auto md:translate-x-0
+                  ${collapsed ? "w-16" : "w-[220px]"}
+                  ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}
     >
       {/* Logo */}
       <div className="flex items-center gap-3 px-4 py-5 border-b border-sidebar-border shrink-0">
@@ -61,9 +77,9 @@ export function Sidebar({ collapsed, onToggle: _onToggle, activePage, onNavigate
             <button
               key={id}
               type="button"
-              onClick={() => onNavigate(id)}
+              onClick={() => { onNavigate(id); onMobileClose(); }}
               title={collapsed ? label : undefined}
-              className={`flex items-center gap-3 w-full rounded-lg px-3 py-2.5 text-sm font-medium
+              className={`flex items-center gap-3 w-full rounded-lg px-3 py-3 md:py-2.5 text-sm font-medium
                           transition-colors duration-150 group
                           ${active
                             ? "bg-sidebar-active text-white"
@@ -139,6 +155,6 @@ export function Sidebar({ collapsed, onToggle: _onToggle, activePage, onNavigate
       </div>
 
       {/* Collapse toggle removed */}
-    </motion.aside>
+    </aside>
   );
 }

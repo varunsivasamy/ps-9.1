@@ -3,6 +3,11 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      // Small phones (iPhone SE is 375px) need one more stop below Tailwind's
+      // 640px `sm` to drop labels before the header runs out of room.
+      screens: {
+        xs: "420px",
+      },
       colors: {
         sidebar: {
           bg:     "#0f1117",

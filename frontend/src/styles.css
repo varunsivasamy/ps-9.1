@@ -1093,3 +1093,36 @@ kbd {
 .toast[data-tone="good"] .toast__dot { background: var(--green); }
 .toast[data-tone="bad"]  .toast__dot { background: var(--red); }
 .toast__text { flex: 1; }
+
+/* ── Mobile ────────────────────────────────────────────────────────────
+   The Tailwind-authored shell handles its own breakpoints; these rules
+   cover the older hand-written components (audit trail, calibration,
+   action result, data table) that predate the overhaul and were still
+   sized for a desktop column. Breakpoint matches Tailwind's `sm`. */
+@media (max-width: 640px) {
+  .panel { padding: 0.85rem 0.9rem; border-radius: var(--radius-sm); }
+
+  .action-result { padding: 1rem 0.9rem; }
+  .answer-card   { padding: 0.85rem 0.9rem; }
+
+  /* Inner scrollers fight the page scroll on touch — let the page own it. */
+  .audit-trail__list,
+  .calibration-list { max-height: none; overflow-y: visible; }
+
+  /* dt's 145px label column leaves almost nothing for the value at 375px. */
+  .risk-breakdown__row { flex-direction: column; gap: 0.15rem; }
+  .risk-breakdown__row dt { min-width: 0; }
+
+  /* Filter and export share a full-width row under the table title. */
+  .data-block__tools { width: 100%; }
+  .data-block__filter {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+    font-size: 16px; /* below 16px iOS Safari zooms the page on focus */
+  }
+
+  .approval-controls { max-width: none; }
+
+  .toast-stack { bottom: 0.75rem; right: 0.75rem; left: 0.75rem; max-width: none; }
+}

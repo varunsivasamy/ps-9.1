@@ -1,4 +1,4 @@
-import { Bell, Clock, Search, Wifi } from "lucide-react";
+import { Bell, Clock, Menu, Search, Wifi } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { HealthResponse } from "../types";
 
@@ -8,6 +8,8 @@ interface TopHeaderProps {
   sessionId: string;
   onSessionIdChange: (v: string) => void;
   onNewSession: () => void;
+  /** Opens the off-canvas sidebar; only rendered below `md`. */
+  onMenuClick: () => void;
 }
 
 export function TopHeader({
@@ -15,6 +17,7 @@ export function TopHeader({
   healthError,
   sessionId,
   onNewSession,
+  onMenuClick,
 }: TopHeaderProps) {
   const [time, setTime] = useState(new Date());
   const [query, setQuery] = useState("");
@@ -28,9 +31,20 @@ export function TopHeader({
 
   return (
     <header className="h-14 bg-white border-b border-gray-200 flex items-center
-                       gap-4 px-5 shrink-0 z-10">
-      {/* Search */}
-      <div className="relative flex-1 max-w-md">
+                       gap-2 sm:gap-4 px-3 sm:px-5 shrink-0 z-10">
+      {/* Drawer trigger — the sidebar is off-canvas below `md`. */}
+      <button
+        type="button"
+        onClick={onMenuClick}
+        aria-label="Open navigation"
+        className="md:hidden w-9 h-9 shrink-0 flex items-center justify-center rounded-lg
+                   text-ink-muted hover:bg-surface-muted transition-colors"
+      >
+        <Menu size={19} />
+      </button>
+
+      {/* Search — hidden on phones, where it costs more width than it earns */}
+      <div className="relative flex-1 max-w-md hidden md:block">
         <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint" />
         <input
           type="text"
@@ -43,14 +57,20 @@ export function TopHeader({
         />
       </div>
 
-      <div className="flex items-center gap-3 ml-auto">
-        {/* API status */}
-        <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold
+      <div className="flex items-center gap-2 sm:gap-3 ml-auto min-w-0">
+        {/* API status — the label collapses to a dot-and-word on narrow screens */}
+        <div className={`flex items-center gap-1.5 px-2 sm:px-3 py-1 rounded-full text-xs
+          font-semibold shrink-0
           ${apiOk
             ? "bg-risk-low-bg text-risk-low"
             : "bg-risk-high-bg text-risk-high"}`}>
-          <Wifi size={12} />
-          {apiOk ? "API Online" : healthError ? "API Offline" : "Checking…"}
+          <Wifi size={12} className="shrink-0" />
+          <span className="hidden xs:inline">
+            {apiOk ? "API Online" : healthError ? "API Offline" : "Checking…"}
+          </span>
+          <span className="xs:hidden">
+            {apiOk ? "Online" : healthError ? "Offline" : "…"}
+          </span>
         </div>
 
         {/* Session pill */}
@@ -66,7 +86,7 @@ export function TopHeader({
         </button>
 
         {/* Clock */}
-        <div className="flex items-center gap-1.5 text-xs text-ink-muted">
+        <div className="hidden sm:flex items-center gap-1.5 text-xs text-ink-muted shrink-0">
           <Clock size={13} />
           {time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
         </div>
@@ -74,7 +94,7 @@ export function TopHeader({
         {/* Notifications */}
         <button
           type="button"
-          className="relative w-8 h-8 flex items-center justify-center rounded-lg
+          className="relative w-9 h-9 shrink-0 flex items-center justify-center rounded-lg
                      hover:bg-surface-muted transition-colors"
         >
           <Bell size={16} className="text-ink-muted" />

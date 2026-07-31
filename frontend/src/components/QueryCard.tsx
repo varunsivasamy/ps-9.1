@@ -57,24 +57,25 @@ export function QueryCard({ onSubmit, disabled }: QueryCardProps) {
       className="bg-white rounded-2xl border border-gray-200 shadow-card w-full"
     >
       {/* Card header */}
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100">
-        <div className="w-8 h-8 rounded-lg bg-brand-soft flex items-center justify-center">
+      <div className="flex items-center gap-3 px-4 sm:px-5 py-4 border-b border-gray-100">
+        <div className="w-8 h-8 shrink-0 rounded-lg bg-brand-soft flex items-center justify-center">
           <Brain size={16} className="text-brand" />
         </div>
-        <div>
+        <div className="min-w-0">
           <h2 className="text-sm font-bold text-ink">Natural Language Query</h2>
           <p className="text-xs text-ink-faint">
             Ask the agent anything about the transaction data
           </p>
         </div>
-        <div className="ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full
+        {/* Decorative — first thing to go when the header runs out of width */}
+        <div className="ml-auto hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full
                         bg-surface-muted text-xs text-ink-muted font-medium border border-gray-200">
           <Sparkles size={11} className="text-brand" />
           AI Powered
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="p-5 flex flex-col gap-4">
+      <form onSubmit={handleSubmit} className="p-4 sm:p-5 flex flex-col gap-4">
         {/* Textarea */}
         <div className="relative">
           <textarea
@@ -85,8 +86,10 @@ export function QueryCard({ onSubmit, disabled }: QueryCardProps) {
             onKeyDown={handleKey}
             disabled={disabled}
             placeholder="e.g. How much revenue did Clothing generate at Kanyon mall last year?"
+            /* text-base (16px) on mobile: anything smaller makes iOS Safari
+               zoom the whole page in on focus and never zoom back out. */
             className="w-full resize-none rounded-xl border border-gray-200 bg-surface-subtle
-                       px-4 py-3 text-sm text-ink placeholder:text-ink-faint
+                       px-4 py-3 text-base sm:text-sm text-ink placeholder:text-ink-faint
                        focus:outline-none focus:ring-2 focus:ring-brand/25 focus:border-brand
                        disabled:opacity-50 leading-relaxed"
           />
@@ -119,7 +122,8 @@ export function QueryCard({ onSubmit, disabled }: QueryCardProps) {
         </div>
 
         {/* Risk legend */}
-        <div className="flex items-center gap-4 p-3 rounded-xl bg-surface-subtle border border-gray-200">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 p-3 rounded-xl
+                        bg-surface-subtle border border-gray-200">
           <div className="flex items-center gap-1.5 text-xs text-ink-muted">
             <Zap size={12} className="text-risk-low" />
             <span className="font-semibold text-risk-low">Low</span>
@@ -138,14 +142,16 @@ export function QueryCard({ onSubmit, disabled }: QueryCardProps) {
         </div>
 
         {/* Actions */}
-        <div className="flex items-center justify-end gap-3 pt-1 flex-wrap">
+        {/* Stacked and full-width on phones so both stay comfortably tappable */}
+        <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center
+                        sm:justify-end gap-2 sm:gap-3 pt-1">
           <button
             type="button"
             onClick={() => setValue("")}
             disabled={!value || disabled}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-gray-200
-                       text-sm font-medium text-ink-muted hover:bg-surface-muted
-                       hover:text-ink disabled:opacity-40 transition-colors"
+            className="flex items-center justify-center gap-1.5 px-4 py-2.5 sm:py-2 rounded-lg
+                       border border-gray-200 text-sm font-medium text-ink-muted
+                       hover:bg-surface-muted hover:text-ink disabled:opacity-40 transition-colors"
           >
             <RotateCcw size={13} />
             Clear
@@ -154,9 +160,9 @@ export function QueryCard({ onSubmit, disabled }: QueryCardProps) {
           <button
             type="submit"
             disabled={!value.trim() || disabled}
-            className="flex items-center gap-2 px-6 py-2 rounded-lg bg-brand text-white
-                       text-sm font-semibold hover:bg-brand-hover transition-colors
-                       disabled:opacity-40 shadow-sm hover:shadow whitespace-nowrap"
+            className="flex items-center justify-center gap-2 px-6 py-2.5 sm:py-2 rounded-lg
+                       bg-brand text-white text-sm font-semibold hover:bg-brand-hover
+                       transition-colors disabled:opacity-40 shadow-sm hover:shadow whitespace-nowrap"
           >
             <Send size={14} />
             {disabled ? "Analyzing…" : "Analyze Request"}

@@ -32,6 +32,7 @@ const PROGRESS_STEPS = [
 
 export default function App() {
   const [collapsed, setCollapsed]       = useState(false);
+  const [navOpen, setNavOpen]           = useState(false);
   const [activePage, setActivePage]     = useState("query");
   const [sessionId, setSessionId]       = useState(generateSessionId);
   const [health, setHealth]             = useState<HealthResponse | null>(null);
@@ -123,14 +124,28 @@ export default function App() {
 
 
   return (
-    <div className="flex h-screen bg-surface-subtle font-sans overflow-hidden">
+    // 100dvh rather than 100vh: on mobile browsers 100vh includes the
+    // collapsing URL bar, which pushes the composer off the bottom of the screen.
+    <div className="flex h-[100dvh] bg-surface-subtle font-sans overflow-hidden">
       {/* Sidebar */}
       <Sidebar
         collapsed={collapsed}
         onToggle={() => setCollapsed((c) => !c)}
         activePage={activePage}
         onNavigate={setActivePage}
+        mobileOpen={navOpen}
+        onMobileClose={() => setNavOpen(false)}
       />
+
+      {/* Drawer backdrop — mobile only, so the open drawer is dismissible */}
+      {navOpen && (
+        <button
+          type="button"
+          aria-label="Close navigation"
+          onClick={() => setNavOpen(false)}
+          className="md:hidden fixed inset-0 z-40 bg-ink/40 backdrop-blur-[1px]"
+        />
+      )}
 
       {/* Main area */}
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
@@ -141,12 +156,13 @@ export default function App() {
           sessionId={sessionId}
           onSessionIdChange={setSessionId}
           onNewSession={() => setSessionId(generateSessionId())}
+          onMenuClick={() => setNavOpen(true)}
         />
 
         {/* Page body */}
         <div className="flex flex-1 min-h-0 overflow-hidden">
           {/* Left: query + transcript */}
-          <main className="flex-1 overflow-y-auto p-6 flex flex-col gap-4 min-w-0">
+          <main className="flex-1 overflow-y-auto p-3 sm:p-6 flex flex-col gap-3 sm:gap-4 min-w-0">
             {activePage === "audit" && (
               <AuditTrail
                 sessionId={sessionId}
