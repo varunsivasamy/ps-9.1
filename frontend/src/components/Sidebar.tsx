@@ -4,6 +4,7 @@ import {
   ClipboardList,
   Database,
   Hexagon,
+  SlidersHorizontal,
   User,
 } from "lucide-react";
 
@@ -17,6 +18,7 @@ interface SidebarProps {
 const NAV = [
   { id: "query", label: "Query Agent", icon: Database },
   { id: "audit", label: "Audit Trail", icon: ClipboardList },
+  { id: "calibration", label: "Calibration", icon: SlidersHorizontal },
 ];
 
 const STATUS = [

@@ -30,6 +30,9 @@ Globals:
         DYNAMODB_TABLE_PREFIX: !Ref TablePrefix
         CORS_ALLOWED_ORIGINS: !Ref CorsAllowedOrigin
         CUSTOMER_DATA_S3_URI: !Sub "s3://${DataBucket}/customer_shopping_data.csv"
+        # The repo-relative default in calibration.py is read-only on Lambda, so
+        # signals would be silently dropped. /tmp is the only writable path.
+        CALIBRATION_PATH: /tmp/calibration.json
 
 Resources:
 

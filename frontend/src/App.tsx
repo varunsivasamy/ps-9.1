@@ -1,12 +1,20 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getAuditTrail, getHealth, proposeAction } from "./api";
+import { getAuditTrail, getCalibration, getHealth, proposeAction } from "./api";
 import { ActionResult } from "./components/ActionResult";
+import { AuditTrail } from "./components/AuditTrail";
+import { CalibrationPanel } from "./components/CalibrationPanel";
 import { QueryCard } from "./components/QueryCard";
 import { Sidebar } from "./components/Sidebar";
 import { ToastStack, useToasts } from "./components/Toasts";
 import { TopHeader } from "./components/TopHeader";
-import type { ApiError, AuditEntry, HealthResponse, Turn } from "./types";
+import type {
+  ApiError,
+  AuditEntry,
+  CalibrationEntry,
+  HealthResponse,
+  Turn,
+} from "./types";
 
 function generateSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto)
@@ -31,9 +39,12 @@ export default function App() {
   const [turns, setTurns]               = useState<Turn[]>([]);
   const [submitting, setSubmitting]     = useState(false);
   const [progressStep, setProgressStep] = useState(0);
-  const [_auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
-  const [_auditLoading, setAuditLoading] = useState(false);
-  const [_auditError, setAuditError]     = useState<string | null>(null);
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError]     = useState<string | null>(null);
+  const [calibration, setCalibration]   = useState<Record<string, CalibrationEntry>>({});
+  const [calibrationLoading, setCalibrationLoading] = useState(false);
+  const [calibrationError, setCalibrationError]     = useState<string | null>(null);
   const { toasts, notify, dismiss } = useToasts();
   const progressTimer                   = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -46,6 +57,15 @@ export default function App() {
       .finally(() => setAuditLoading(false));
   }, []);
 
+  const refreshCalibration = useCallback(() => {
+    setCalibrationLoading(true);
+    setCalibrationError(null);
+    getCalibration()
+      .then((r) => setCalibration(r.calibration))
+      .catch((e: ApiError) => setCalibrationError(e.message))
+      .finally(() => setCalibrationLoading(false));
+  }, []);
+
   useEffect(() => {
     getHealth()
       .then((r) => { setHealth(r); setHealthError(null); })
@@ -56,6 +76,10 @@ export default function App() {
     refreshAudit(sessionId);
     setTurns([]);
   }, [sessionId, refreshAudit]);
+
+  useEffect(() => {
+    refreshCalibration();
+  }, [refreshCalibration]);
 
   function startProgress() {
     setProgressStep(0);
@@ -123,6 +147,27 @@ export default function App() {
         <div className="flex flex-1 min-h-0 overflow-hidden">
           {/* Left: query + transcript */}
           <main className="flex-1 overflow-y-auto p-6 flex flex-col gap-4 min-w-0">
+            {activePage === "audit" && (
+              <AuditTrail
+                sessionId={sessionId}
+                entries={auditEntries}
+                loading={auditLoading}
+                error={auditError}
+                onRefresh={() => refreshAudit(sessionId)}
+              />
+            )}
+
+            {activePage === "calibration" && (
+              <CalibrationPanel
+                table={calibration}
+                loading={calibrationLoading}
+                error={calibrationError}
+                onRefresh={refreshCalibration}
+              />
+            )}
+
+            {activePage === "query" && (
+              <>
             <QueryCard onSubmit={handleSubmit} disabled={submitting} />
 
             {/* Transcript */}
@@ -203,13 +248,20 @@ export default function App() {
                   {turn.state === "done" && turn.result && (
                     <ActionResult
                       result={turn.result}
-                      onResolved={() => refreshAudit(sessionId)}
+                      onResolved={() => {
+                        refreshAudit(sessionId);
+                        // A confirm/reject is also a calibration signal, so the
+                        // learned table is stale the moment one is resolved.
+                        refreshCalibration();
+                      }}
                       onNotify={notify}
                     />
                   )}
                 </motion.div>
               ))}
             </AnimatePresence>
+              </>
+            )}
           </main>
         </div>
       </div>
