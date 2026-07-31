@@ -34,6 +34,13 @@ reassess_action
   wildly wrong even after phase-1 measurement (shouldn't normally happen, but
   possible if the agent filtered differently in phase 2), ``main.py`` calls
   this to let the agent re-score with the true number.
+
+compose_answer
+  Phase 3, after the action has actually run. Turns the raw
+  :class:`~autonomy_engine.executor.ExecutionResult` back into a sentence that
+  answers what the user originally asked. Without it the caller gets
+  ``"Read 47 transaction(s)"`` and has to interpret the rows themselves, which
+  is not an agent answering a question.
 """
 
 from __future__ import annotations
@@ -800,6 +807,121 @@ def _assistant_msg(msg: Any) -> dict[str, Any]:
 
 def _tool_msg(call_id: str, content: str) -> dict[str, Any]:
     return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+
+ANSWER_SYSTEM_PROMPT: Final[str] = """\
+You are answering a user who asked an AI agent to do something with a retail
+transaction database. The action has already run. You are given the original
+request, what the agent did, and the real result.
+
+Write the answer the user is waiting for:
+  - 1-3 sentences, plain prose, no preamble and no markdown.
+  - Lead with the number or fact they actually asked for.
+  - Use ONLY figures present in the result JSON. Never estimate, extrapolate,
+    or invent a value that is not there.
+  - If `truncated` is true, say the listing was capped but the count is complete.
+  - If `status` is "failed", say plainly that it did not run and why.
+
+`rows` may be a short sample given to you for inspection, and `_sample_note`
+describes that sampling. Both are internal. Never mention them, and never
+report the sample size as if it were the result — the real figure is
+`affected_count`. The user is shown the full table separately.
+
+Do not describe risk, routing, or approval — the interface already shows those.
+"""
+
+#: Rows sent to the answer model. The API returns up to QUERY_ROW_LIMIT (25),
+#: but the model only needs a sample to characterise them, and a full 25-row
+#: dump is mostly wasted tokens.
+_ANSWER_ROW_SAMPLE: Final[int] = 10
+
+
+def compose_answer(
+    user_request: str,
+    action_description: str,
+    result: dict[str, Any],
+) -> str:
+    """Turn a finished execution back into an answer to the original question.
+
+    Best-effort by design. This runs *after* the action has already happened, so
+    a failure here must never turn a successful execution into an error
+    response -- every failure path falls back to :func:`_fallback_answer`, which
+    is derived from the same result dict without a network call.
+
+    Args:
+        user_request: What the user originally asked for.
+        action_description: The agent's own description of the action it took.
+        result: The :meth:`~autonomy_engine.executor.ExecutionResult.to_payload`
+            dict from the run.
+
+    Returns:
+        A short prose answer. Never raises.
+    """
+    grounding = dict(result)
+    rows = grounding.get("rows")
+    if isinstance(rows, list) and len(rows) > _ANSWER_ROW_SAMPLE:
+        grounding["rows"] = rows[:_ANSWER_ROW_SAMPLE]
+        grounding["_sample_note"] = (
+            f"internal: {_ANSWER_ROW_SAMPLE} of {len(rows)} listed rows, for your "
+            "inspection only — do not report this number"
+        )
+
+    try:
+        client = _groq_client()
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            temperature=0,
+            max_tokens=300,
+            messages=[
+                {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Original request: {user_request}\n\n"
+                        f"Action taken: {action_description}\n\n"
+                        f"Result: {json.dumps(grounding, default=str)}"
+                    ),
+                },
+            ],
+        )
+        answer = (response.choices[0].message.content or "").strip()
+        if answer:
+            return answer
+        logger.warning("answer model returned empty content; using fallback")
+    except Exception:  # noqa: BLE001 - the action already ran; never fail here
+        logger.warning("could not compose answer via model; using fallback", exc_info=True)
+
+    return _fallback_answer(result)
+
+
+def _fallback_answer(result: dict[str, Any]) -> str:
+    """A grounded answer built from the result alone, with no model call.
+
+    Deliberately plain. Its job is to make sure the user always gets the
+    figures, even when the answer model is unreachable.
+    """
+    detail = str(result.get("detail") or "The action completed.")
+
+    if result.get("status") == "failed":
+        return f"That did not run: {detail}"
+    if result.get("status") == "skipped":
+        return f"Nothing was run: {detail}"
+
+    parts = [detail.rstrip(".") + "."]
+
+    summary = result.get("summary")
+    if isinstance(summary, dict):
+        groups = summary.get("groups")
+        if isinstance(groups, dict) and groups:
+            parts.append(f"Broken down across {len(groups)} group(s).")
+
+    if result.get("truncated"):
+        parts.append(
+            f"The listing below is capped at {len(result.get('rows') or [])} rows; "
+            "the count itself is complete."
+        )
+
+    return " ".join(parts)
 
 
 def _describe(tool_name: str, parameters: dict[str, Any]) -> str:

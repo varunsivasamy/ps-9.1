@@ -72,3 +72,5 @@ data/action_type_calibration.json
 .DS_Store
 Thumbs.db
 desktop.ini
+
+lambda_package/

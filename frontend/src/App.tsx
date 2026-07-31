@@ -1,65 +1,65 @@
+import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getAuditTrail, getHealth, proposeAction } from "./api";
 import { ActionResult } from "./components/ActionResult";
-import { AuditTrail } from "./components/AuditTrail";
-import { RequestForm } from "./components/RequestForm";
-import { SessionBar } from "./components/SessionBar";
-import type { ApiError, AuditEntry, HealthResponse, ProposeResponse } from "./types";
+import { QueryCard } from "./components/QueryCard";
+import { Sidebar } from "./components/Sidebar";
+import { ToastStack, useToasts } from "./components/Toasts";
+import { TopHeader } from "./components/TopHeader";
+import type { ApiError, AuditEntry, HealthResponse, Turn } from "./types";
 
 function generateSessionId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto)
     return `session-${crypto.randomUUID()}`;
-  }
   return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-// Progress steps shown while the agent is thinking
 const PROGRESS_STEPS = [
   "Sending request to agent…",
-  "Agent measuring data scope…",
+  "Measuring real data scope…",
   "Scoring risk dimensions…",
-  "Routing decision…",
+  "Routing the decision…",
+  "Composing the answer…",
 ];
 
 export default function App() {
+  const [collapsed, setCollapsed]       = useState(false);
+  const [activePage, setActivePage]     = useState("query");
   const [sessionId, setSessionId]       = useState(generateSessionId);
   const [health, setHealth]             = useState<HealthResponse | null>(null);
   const [healthError, setHealthError]   = useState<string | null>(null);
+  const [turns, setTurns]               = useState<Turn[]>([]);
   const [submitting, setSubmitting]     = useState(false);
   const [progressStep, setProgressStep] = useState(0);
-  const [submitError, setSubmitError]   = useState<string | null>(null);
-  const [latestResult, setLatestResult] = useState<ProposeResponse | null>(null);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError]     = useState<string | null>(null);
+  const { toasts, notify, dismiss } = useToasts();
   const progressTimer                   = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refreshAudit = useCallback((id: string) => {
     setAuditLoading(true);
     setAuditError(null);
     getAuditTrail(id)
-      .then((res) => setAuditEntries(res.actions))
-      .catch((err: ApiError) => setAuditError(err.message))
+      .then((r) => setAuditEntries(r.actions))
+      .catch((e: ApiError) => setAuditError(e.message))
       .finally(() => setAuditLoading(false));
   }, []);
 
-  // Health check once on mount
   useEffect(() => {
     getHealth()
-      .then((res) => { setHealth(res); setHealthError(null); })
-      .catch((err: ApiError) => setHealthError(err.message));
+      .then((r) => { setHealth(r); setHealthError(null); })
+      .catch((e: ApiError) => setHealthError(e.message));
   }, []);
 
-  // Reload audit when session changes
   useEffect(() => {
     refreshAudit(sessionId);
-    setLatestResult(null);
+    setTurns([]);
   }, [sessionId, refreshAudit]);
 
   function startProgress() {
     setProgressStep(0);
     let step = 0;
-    // Advance through steps every ~1.5s while waiting for the LLM
     progressTimer.current = setInterval(() => {
       step = Math.min(step + 1, PROGRESS_STEPS.length - 1);
       setProgressStep(step);
@@ -67,93 +67,154 @@ export default function App() {
   }
 
   function stopProgress() {
-    if (progressTimer.current) {
-      clearInterval(progressTimer.current);
-      progressTimer.current = null;
-    }
+    if (progressTimer.current) { clearInterval(progressTimer.current); progressTimer.current = null; }
   }
 
+  useEffect(() => stopProgress, []);
+
   async function handleSubmit(userRequest: string) {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const startedAt = performance.now();
+
+    setTurns((c) => [{ id, request: userRequest, askedAt: Date.now(), state: "pending" }, ...c]);
     setSubmitting(true);
-    setSubmitError(null);
-    setLatestResult(null);
     startProgress();
+    // Auto-switch to query page
+    setActivePage("query");
+
     try {
       const result = await proposeAction(userRequest, sessionId);
-      setLatestResult(result);
-      // Optimistically prepend the new entry so the audit trail updates
-      // immediately — the real refresh follows asynchronously
+      const elapsedMs = Math.round(performance.now() - startedAt);
+      setTurns((c) => c.map((t) => t.id === id ? { ...t, state: "done", result, elapsedMs } : t));
       refreshAudit(sessionId);
     } catch (err) {
-      setSubmitError((err as ApiError).message);
+      const message = (err as ApiError).message;
+      setTurns((c) => c.map((t) => t.id === id ? { ...t, state: "error", error: message } : t));
+      notify(message, "bad");
     } finally {
       stopProgress();
       setSubmitting(false);
     }
   }
 
-  return (
-    <div className="app">
-      <header className="app__header">
-        <div className="app__title-row">
-          <span className="app__logo" aria-hidden="true">⬡</span>
-          <h1>Agent Risk Console</h1>
-        </div>
-        <p className="app__subtitle">
-          Send a request to the agent. It measures actual data scope, scores risk across
-          four dimensions, then either runs it automatically, asks for your confirmation,
-          or blocks for full review.
-        </p>
-      </header>
 
-      <SessionBar
-        sessionId={sessionId}
-        onSessionIdChange={setSessionId}
-        onNewSession={() => setSessionId(generateSessionId())}
-        health={health}
-        healthError={healthError}
+  return (
+    <div className="flex h-screen bg-surface-subtle font-sans overflow-hidden">
+      {/* Sidebar */}
+      <Sidebar
+        collapsed={collapsed}
+        onToggle={() => setCollapsed((c) => !c)}
+        activePage={activePage}
+        onNavigate={setActivePage}
       />
 
-      <main className="app__main">
-        <section className="app__column">
-          <RequestForm onSubmit={handleSubmit} disabled={submitting} />
+      {/* Main area */}
+      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+        {/* Top header */}
+        <TopHeader
+          health={health}
+          healthError={healthError}
+          sessionId={sessionId}
+          onSessionIdChange={setSessionId}
+          onNewSession={() => setSessionId(generateSessionId())}
+        />
 
-          {/* Progress indicator while agent is thinking */}
-          {submitting && (
-            <div className="progress-card" role="status" aria-live="polite">
-              <span className="progress-card__spinner" aria-hidden="true" />
-              <span className="progress-card__text">{PROGRESS_STEPS[progressStep]}</span>
-            </div>
-          )}
+        {/* Page body */}
+        <div className="flex flex-1 min-h-0 overflow-hidden">
+          {/* Left: query + transcript */}
+          <main className="flex-1 overflow-y-auto p-6 flex flex-col gap-4 min-w-0">
+            <QueryCard onSubmit={handleSubmit} disabled={submitting} />
 
-          {submitError && <p className="form-error">{submitError}</p>}
+            {/* Transcript */}
+            {turns.length === 0 && !submitting && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex flex-col items-center justify-center py-12 text-center"
+              >
+                <div className="w-14 h-14 rounded-2xl bg-brand-soft flex items-center
+                                justify-center mb-4 text-2xl">
+                  ⌘
+                </div>
+                <p className="font-bold text-ink mb-1">No queries yet</p>
+                <p className="text-sm text-ink-muted max-w-xs">
+                  Pick an example or type your own. Low-risk queries execute instantly;
+                  higher-risk ones wait for your approval.
+                </p>
+              </motion.div>
+            )}
 
-          {latestResult && !submitting && (
-            <ActionResult
-              result={latestResult}
-              onResolved={() => refreshAudit(sessionId)}
-              onClarify={(answer) => {
-                // Re-submit with the clarification answer attached
-                const original =
-                  latestResult.routing_decision === "needs_clarification"
-                    ? (latestResult as { question: string }).question
-                    : "";
-                handleSubmit(`${original} — clarification: ${answer}`);
-              }}
-            />
-          )}
-        </section>
+            <AnimatePresence initial={false}>
+              {turns.map((turn) => (
+                <motion.div
+                  key={turn.id}
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.25 }}
+                  className="flex flex-col gap-3"
+                >
+                  {/* Question bubble */}
+                  <div className="flex items-start gap-3 bg-white border border-gray-200
+                                  rounded-xl px-4 py-3 shadow-card">
+                    <span className="shrink-0 text-[10px] font-bold uppercase tracking-widest
+                                     text-brand bg-brand-soft border border-brand/20
+                                     rounded-full px-2 py-0.5 mt-0.5">
+                      You
+                    </span>
+                    <p className="text-sm font-medium text-ink flex-1 leading-relaxed">
+                      {turn.request}
+                    </p>
+                    {turn.elapsedMs != null && (
+                      <span className="text-[11px] text-ink-faint font-mono shrink-0 mt-0.5">
+                        {(turn.elapsedMs / 1000).toFixed(1)}s
+                      </span>
+                    )}
+                  </div>
 
-        <section className="app__column">
-          <AuditTrail
-            sessionId={sessionId}
-            entries={auditEntries}
-            loading={auditLoading}
-            error={auditError}
-            onRefresh={() => refreshAudit(sessionId)}
-          />
-        </section>
-      </main>
+                  {/* Pending */}
+                  {turn.state === "pending" && (
+                    <div className="flex items-center gap-3 bg-white border border-gray-200
+                                    rounded-xl px-4 py-3 shadow-card">
+                      <div className="w-4 h-4 border-2 border-gray-200 border-t-brand
+                                      rounded-full animate-spin shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-sm text-ink-muted font-medium">
+                          {PROGRESS_STEPS[progressStep]}
+                        </p>
+                        <div className="mt-1.5 h-1 bg-gray-100 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-brand rounded-full transition-all duration-700"
+                            style={{ width: `${((progressStep + 1) / PROGRESS_STEPS.length) * 100}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Error */}
+                  {turn.state === "error" && (
+                    <div className="bg-risk-high-bg border border-risk-high/20 rounded-xl
+                                    px-4 py-3 text-sm text-risk-high font-medium">
+                      {turn.error}
+                    </div>
+                  )}
+
+                  {/* Result */}
+                  {turn.state === "done" && turn.result && (
+                    <ActionResult
+                      result={turn.result}
+                      onResolved={() => refreshAudit(sessionId)}
+                      onNotify={notify}
+                    />
+                  )}
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </main>
+        </div>
+      </div>
+
+      <ToastStack toasts={toasts} onDismiss={dismiss} />
     </div>
   );
 }

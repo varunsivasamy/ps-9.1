@@ -1,3 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 /* ── Design tokens ─────────────────────────────────────────────────
    Clean light theme. High contrast, readable text, subtle depth.
    ────────────────────────────────────────────────────────────────── */

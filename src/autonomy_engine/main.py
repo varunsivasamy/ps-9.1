@@ -9,6 +9,7 @@ and never leaks a raw stack trace to the caller.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -23,6 +24,7 @@ from pydantic import BaseModel, Field
 from autonomy_engine import audit_store, calibration, confirmation, executor, risk_scorer
 from autonomy_engine.agent_actions import (
     AgentActionError,
+    compose_answer,
     propose_action,
 )
 from autonomy_engine.logging_config import configure_logging
@@ -46,11 +48,21 @@ app = FastAPI(
 # The React front end is served from a different origin (localhost:5173 in
 # dev, a Vercel domain in production), so the browser needs an explicit
 # allow-list rather than the default same-origin policy. Comma-separated list
-# in CORS_ALLOWED_ORIGINS; defaults to the two Vite dev ports so local
-# development works with zero configuration.
+# in CORS_ALLOWED_ORIGINS; defaults to the Vite dev ports so local development
+# works with zero configuration.
+#
+# The fallback ports matter as much as 5173 itself. Vite does not fail when
+# 5173 is taken -- it quietly moves to 5174, then 5175 -- and the only symptom
+# is every request dying at the preflight with "Disallowed CORS origin", which
+# reads like a broken API rather than a busy port. Covering the range it
+# actually walks costs nothing in dev and is overridden wholesale in
+# production, where this list must stay tight.
 # --------------------------------------------------------------------------
 
-_default_origins = "http://localhost:5173,http://127.0.0.1:5173"
+_DEV_PORTS = (5173, 5174, 5175)
+_default_origins = ",".join(
+    f"http://{host}:{port}" for port in _DEV_PORTS for host in ("localhost", "127.0.0.1")
+)
 _allowed_origins = [
     origin.strip()
     for origin in os.getenv("CORS_ALLOWED_ORIGINS", _default_origins).split(",")
@@ -274,6 +286,11 @@ async def propose(body: ProposeRequest, request: Request) -> dict:
             "routing_decision": decision,
             "risk_score": _score_payload(assessment),
             "result": result.to_payload(),
+            # The point of the whole request: what the user actually asked,
+            # answered in words, grounded in the result that just came back.
+            "answer": compose_answer(
+                body.user_request, action.description, result.to_payload()
+            ),
             "audit_record_id": record["record_id"],
         }
 
@@ -376,14 +393,47 @@ def _resolution_payload(record: dict) -> dict:
     ``status`` is the authorisation outcome and ``execution_status`` is whether
     the action then worked. Both are returned because a reviewer who clicks
     approve needs to know if the deletion actually happened.
+
+    An approved read is still a question the user asked, so the full result and
+    a prose ``answer`` come back here too -- otherwise confirming an action
+    would tell you it succeeded without ever showing you what it found.
     """
-    return {
+    result = _parse_execution_result(record)
+    payload = {
         "status": record["status"],
         "reviewer": record["reviewer"],
         "execution_status": record.get("execution_status"),
         "execution_detail": record.get("execution_detail"),
         "snapshot_path": record.get("snapshot_path"),
+        "result": result,
+        "answer": None,
     }
+
+    if result and record.get("execution_status") == "success":
+        description = str(record.get("description") or "")
+        payload["answer"] = compose_answer(description, description, result)
+
+    return payload
+
+
+def _parse_execution_result(record: dict) -> dict | None:
+    """Read back the execution payload the audit store holds as a JSON string.
+
+    A record written before this field existed, or one whose JSON is somehow
+    unreadable, comes back as ``None`` rather than raising -- the resolution
+    itself already succeeded and must still be reported.
+    """
+    raw = record.get("execution_result")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("unparseable execution_result on %s", record.get("record_id"))
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _trail_entry(record: dict) -> dict:

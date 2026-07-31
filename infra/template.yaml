@@ -62,7 +62,7 @@ Resources:
     Properties:
       FunctionName: autonomy-engine
       Handler: autonomy_engine.lambda_handler.handler
-      CodeUri: ../
+      CodeUri: ../lambda_package/
       Description: FastAPI autonomy engine wrapped with Mangum
       Policies:
         - DynamoDBCrudPolicy:

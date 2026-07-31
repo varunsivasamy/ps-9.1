@@ -2,6 +2,7 @@ import {
   ApiError,
   type ApiErrorPayload,
   type AuditTrailResponse,
+  type CalibrationResponse,
   type ConfirmationDecision,
   type HealthResponse,
   type ProposeResponse,
@@ -77,6 +78,11 @@ export function getAuditTrail(sessionId: string): Promise<AuditTrailResponse> {
 
 export function getHealth(): Promise<HealthResponse> {
   return request<HealthResponse>("/health");
+}
+
+/** The adaptive-calibration table — what the engine has learned per action_type. */
+export function getCalibration(): Promise<CalibrationResponse> {
+  return request<CalibrationResponse>("/calibration");
 }
 
 export { BASE_URL as apiBaseUrl };
