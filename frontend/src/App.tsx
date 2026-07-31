@@ -31,9 +31,9 @@ export default function App() {
   const [turns, setTurns]               = useState<Turn[]>([]);
   const [submitting, setSubmitting]     = useState(false);
   const [progressStep, setProgressStep] = useState(0);
-  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
-  const [auditLoading, setAuditLoading] = useState(false);
-  const [auditError, setAuditError]     = useState<string | null>(null);
+  const [_auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [_auditLoading, setAuditLoading] = useState(false);
+  const [_auditError, setAuditError]     = useState<string | null>(null);
   const { toasts, notify, dismiss } = useToasts();
   const progressTimer                   = useRef<ReturnType<typeof setInterval> | null>(null);
 

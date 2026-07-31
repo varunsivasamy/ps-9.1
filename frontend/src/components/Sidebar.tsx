@@ -25,7 +25,7 @@ const STATUS = [
   { label: "LLM API",  ok: true  },
 ];
 
-export function Sidebar({ collapsed, onToggle, activePage, onNavigate }: SidebarProps) {
+export function Sidebar({ collapsed, onToggle: _onToggle, activePage, onNavigate }: SidebarProps) {
   return (
     <motion.aside
       animate={{ width: collapsed ? 64 : 220 }}
